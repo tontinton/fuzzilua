@@ -1,0 +1,167 @@
+use std::sync::atomic::{AtomicU8, Ordering};
+
+use crate::bitmap::CoverageBitmap;
+
+pub struct AtomicBitmap {
+    buf: Vec<AtomicU8>,
+    edge_len: usize,
+}
+
+impl AtomicBitmap {
+    pub fn new(edge_size: usize, gc_size: usize) -> Self {
+        Self {
+            buf: (0..edge_size + gc_size).map(|_| AtomicU8::new(0)).collect(),
+            edge_len: edge_size,
+        }
+    }
+
+    fn edge_atoms(&self) -> &[AtomicU8] {
+        &self.buf[..self.edge_len]
+    }
+
+    fn gc_atoms(&self) -> &[AtomicU8] {
+        &self.buf[self.edge_len..]
+    }
+
+    pub fn has_new_bits(&self, local: &CoverageBitmap) -> bool {
+        has_new_bits_atomic(local.edge_bytes(), self.edge_atoms())
+            || has_new_bits_atomic(local.gc_bytes(), self.gc_atoms())
+    }
+
+    pub fn merge(&self, local: &CoverageBitmap) {
+        merge_atomic(local.edge_bytes(), self.edge_atoms());
+        merge_atomic(local.gc_bytes(), self.gc_atoms());
+    }
+
+    pub fn snapshot(&self) -> CoverageBitmap {
+        let bytes: Vec<u8> = self.buf.iter().map(|a| a.load(Ordering::Relaxed)).collect();
+        CoverageBitmap::from_raw(bytes, self.edge_len)
+    }
+}
+
+fn has_new_bits_atomic(local: &[u8], global: &[AtomicU8]) -> bool {
+    assert_eq!(
+        local.len(),
+        global.len(),
+        "bitmap size mismatch in has_new_bits_atomic"
+    );
+    for (l, g) in local.iter().zip(global.iter()) {
+        if l & !g.load(Ordering::Relaxed) != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+fn merge_atomic(src: &[u8], dst: &[AtomicU8]) {
+    assert_eq!(src.len(), dst.len(), "bitmap size mismatch in merge_atomic");
+    for (s, d) in src.iter().zip(dst.iter()) {
+        if *s != 0 {
+            d.fetch_or(*s, Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::thread;
+
+    #[test]
+    fn concurrent_merge_overlapping_regions() {
+        let atomic = Arc::new(AtomicBitmap::new(16, 16));
+
+        let thread_data: Vec<CoverageBitmap> = vec![
+            {
+                let mut bm = CoverageBitmap::new(16, 16);
+                for b in &mut bm.edge_bytes_mut()[0..8] {
+                    *b = 0x01;
+                }
+                bm
+            },
+            {
+                let mut bm = CoverageBitmap::new(16, 16);
+                for b in &mut bm.edge_bytes_mut()[0..8] {
+                    *b = 0x02;
+                }
+                bm
+            },
+            {
+                let mut bm = CoverageBitmap::new(16, 16);
+                for b in &mut bm.edge_bytes_mut()[4..12] {
+                    *b = 0x04;
+                }
+                bm
+            },
+            {
+                let mut bm = CoverageBitmap::new(16, 16);
+                for b in &mut bm.gc_bytes_mut()[0..8] {
+                    *b = 0x80;
+                }
+                bm
+            },
+        ];
+
+        let handles: Vec<_> = thread_data
+            .into_iter()
+            .map(|local| {
+                let a = Arc::clone(&atomic);
+                thread::spawn(move || {
+                    a.merge(&local);
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let snap = atomic.snapshot();
+
+        for i in 0..4 {
+            assert_eq!(snap.edge_bytes()[i], 0x03, "edge byte {i}");
+        }
+        for i in 4..8 {
+            assert_eq!(snap.edge_bytes()[i], 0x07, "edge byte {i}");
+        }
+        for i in 8..12 {
+            assert_eq!(snap.edge_bytes()[i], 0x04, "edge byte {i}");
+        }
+        for i in 0..8 {
+            assert_eq!(snap.gc_bytes()[i], 0x80, "gc byte {i}");
+        }
+    }
+
+    #[test]
+    fn has_new_bits_consistent_with_non_atomic() {
+        let mut local = CoverageBitmap::new(16, 16);
+        local.edge_bytes_mut()[3] = 0x0F;
+        local.gc_bytes_mut()[7] = 0x80;
+
+        let mut global_plain = CoverageBitmap::new(16, 16);
+        global_plain.edge_bytes_mut()[3] = 0x03;
+
+        let atomic = AtomicBitmap::new(16, 16);
+        atomic.buf[3].store(0x03, Ordering::Relaxed);
+
+        assert_eq!(
+            local.has_new_bits(&global_plain),
+            atomic.has_new_bits(&local)
+        );
+
+        // subset case: no new bits
+        let mut subset = CoverageBitmap::new(16, 16);
+        subset.edge_bytes_mut()[3] = 0x03;
+        atomic.merge(&local);
+        assert!(!atomic.has_new_bits(&subset));
+    }
+
+    #[test]
+    #[should_panic(expected = "bitmap size mismatch")]
+    fn size_mismatch_panics() {
+        let local = CoverageBitmap::new(16, 16);
+        let atomic = AtomicBitmap::new(32, 32);
+        atomic.has_new_bits(&local);
+    }
+}
