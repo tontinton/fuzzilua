@@ -1,0 +1,11 @@
+[package]
+name = "fuzzilua-corpus"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fuzzilua-ir = { workspace = true }
+fuzzilua-coverage = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }

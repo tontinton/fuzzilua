@@ -1,0 +1,17 @@
+[package]
+name = "fuzzilua-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fuzzilua-ir = { workspace = true }
+fuzzilua-gen = { workspace = true }
+fuzzilua-mutate = { workspace = true }
+fuzzilua-coverage = { workspace = true }
+fuzzilua-corpus = { workspace = true }
+fuzzilua-target = { workspace = true }
+fuzzilua-target-redis = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+color-eyre = { workspace = true }

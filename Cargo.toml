@@ -1,6 +1,32 @@
-[package]
-name = "fuzzilua"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = [
+    "fuzzilua-ir",
+    "fuzzilua-gen",
+    "fuzzilua-mutate",
+    "fuzzilua-coverage",
+    "fuzzilua-corpus",
+    "fuzzilua-target",
+    "fuzzilua-target-redis",
+    "fuzzilua-cli",
+]
+resolver = "3"
 
-[dependencies]
+[workspace.dependencies]
+fuzzilua-ir = { path = "fuzzilua-ir" }
+fuzzilua-gen = { path = "fuzzilua-gen" }
+fuzzilua-mutate = { path = "fuzzilua-mutate" }
+fuzzilua-coverage = { path = "fuzzilua-coverage" }
+fuzzilua-corpus = { path = "fuzzilua-corpus" }
+fuzzilua-target = { path = "fuzzilua-target" }
+fuzzilua-target-redis = { path = "fuzzilua-target-redis" }
+
+rand = "0.9"
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+memmap2 = "0.9"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+color-eyre = "0.6"
+nix = { version = "0.29", features = ["signal", "process"] }
+thiserror = "2"

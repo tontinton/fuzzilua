@@ -1,0 +1,9 @@
+[package]
+name = "fuzzilua-target-redis"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fuzzilua-target = { workspace = true }
+fuzzilua-coverage = { workspace = true }
+nix = { workspace = true }
