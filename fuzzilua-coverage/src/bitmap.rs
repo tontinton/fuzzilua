@@ -1,3 +1,5 @@
+/// AFL-style hit count bucketization: maps raw byte counts to power-of-2 buckets.
+/// Applied after each execution to normalize coverage before comparison.
 const BUCKET_MAP: [u8; 256] = {
     let mut table = [0u8; 256];
     let mut i = 1usize;

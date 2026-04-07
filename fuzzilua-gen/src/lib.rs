@@ -1,3 +1,22 @@
+//! Weighted code generators and program builder.
+//!
+//! `CodeGenerator::generate()` returns `Option<()>`. Budget exhaustion propagates
+//! via `?`, which prevents "partial emission" bugs where a generator emits half-built
+//! IR and bails. Every `emit()` call returns `Option<Vec<Variable>>`, so `?` naturally
+//! unwinds the whole generator on budget exhaustion.
+//!
+//! The `CodeGenerator` trait has only `weight()` + `generate()`. We intentionally
+//! removed `required_inputs()` because it was disconnected from reality: most
+//! generators returned `&[]`, and the rest used `ensure_*` helpers anyway.
+//!
+//! `ensure_*` helpers (ensure_table, ensure_string, etc.) create a value on demand
+//! if none of the right type is in scope. They also return `Option`, so budget
+//! exhaustion during value creation propagates cleanly.
+//!
+//! ProgramBuilder uses `BlockKind` from the IR crate directly (not a private copy).
+//! `begin_block()` uses `op.opens_block()?` to validate the op is a block opener,
+//! and rejects `BeginElse` (must use `begin_else()` instead, which is budget-aware).
+
 mod builder;
 mod generators;
 

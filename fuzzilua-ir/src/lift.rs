@@ -46,6 +46,8 @@ fn emit_assign(
     writeln!(out, "{output} = {rhs}").unwrap();
 }
 
+/// Only emits `local` when ALL vars are new. Mixing local and non-local in
+/// the same multi-assign (e.g. `local a, b = ...` where b exists) is invalid Lua.
 fn declare_multi_assign(
     out: &mut String,
     depth: usize,
