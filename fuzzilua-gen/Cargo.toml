@@ -6,3 +6,6 @@ edition = "2024"
 [dependencies]
 fuzzilua-ir = { workspace = true }
 rand = { workspace = true }
+
+[dev-dependencies]
+test-case = { workspace = true }

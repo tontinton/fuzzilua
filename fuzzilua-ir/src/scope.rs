@@ -23,7 +23,7 @@ impl Program {
                     scope_stack.push(Vec::new());
                 }
                 let depth = scope_stack.len() - 1;
-                let lua_type = Self::infer_output_type(&instr.op);
+                let lua_type = Program::infer_output_type(&instr.op);
                 for v in &instr.outputs {
                     scope_stack.last_mut().unwrap().push(ScopedVariable {
                         var: *v,
@@ -37,7 +37,7 @@ impl Program {
         scope_stack.into_iter().flatten().collect()
     }
 
-    fn infer_output_type(op: &Op) -> LuaType {
+    pub fn infer_output_type(op: &Op) -> LuaType {
         match op {
             Op::LoadNil => LuaType::Nil,
             Op::LoadBool(_) | Op::Compare(_) | Op::UnaryOp(crate::types::UnOp::Not) => {
