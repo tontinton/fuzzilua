@@ -270,6 +270,9 @@ dependencies = [
  "fuzzilua-coverage",
  "fuzzilua-target",
  "nix",
+ "test-case",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]

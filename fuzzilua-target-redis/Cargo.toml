@@ -7,3 +7,8 @@ edition = "2024"
 fuzzilua-target = { workspace = true }
 fuzzilua-coverage = { workspace = true }
 nix = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+test-case = { workspace = true }
