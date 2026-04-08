@@ -10,9 +10,7 @@ pub fn build_crash_report(crash_info: &CrashInfo) -> String {
     if let Some(ref asan) = crash_info.asan_report {
         parts.push(format!("ASan:\n{asan}"));
     }
-    if let Some(ref ubsan) = crash_info.ubsan_report {
-        parts.push(format!("UBSan:\n{ubsan}"));
-    }
+
     if let Some(sig) = crash_info.signal {
         parts.push(format!("Signal: {sig}"));
     }
@@ -39,12 +37,7 @@ pub fn crash_hash(crash_info: &CrashInfo) -> u64 {
             return fnv1a_64(frames.join("|").as_bytes());
         }
     }
-    if let Some(ref ubsan) = crash_info.ubsan_report {
-        let frames = extract_top_frames(ubsan, 3);
-        if !frames.is_empty() {
-            return fnv1a_64(frames.join("|").as_bytes());
-        }
-    }
+
     let sig = crash_info.signal.unwrap_or(0);
     fnv1a_64(format!("signal:{sig}").as_bytes())
 }
@@ -148,7 +141,6 @@ mod tests {
         CrashInfo {
             signal,
             asan_report: asan.map(String::from),
-            ubsan_report: None,
             script: String::new(),
         }
     }

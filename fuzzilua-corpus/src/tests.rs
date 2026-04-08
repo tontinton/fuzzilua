@@ -77,10 +77,14 @@ fn select_panics_on_empty() {
 #[test]
 fn uniform_scheduler_hits_all_entries() {
     let entries: Vec<CorpusEntry> = (0..10)
-        .map(|i| CorpusEntry {
-            program: Program::new(),
-            coverage: make_coverage(&[i], &[]),
-            mutation_count: 0,
+        .map(|i| {
+            let coverage = make_coverage(&[i], &[]);
+            CorpusEntry {
+                cached_nonzero: coverage.total_nonzero(),
+                program: Program::new(),
+                coverage,
+                mutation_count: 0,
+            }
         })
         .collect();
 
@@ -102,15 +106,19 @@ fn uniform_scheduler_hits_all_entries() {
 
 #[test]
 fn weighted_scheduler_favors_more_coverage() {
+    let cov1 = make_coverage(&[0], &[]);
+    let cov2 = make_coverage(&(0..50).collect::<Vec<_>>(), &[]);
     let entries = vec![
         CorpusEntry {
+            cached_nonzero: cov1.total_nonzero(),
             program: Program::new(),
-            coverage: make_coverage(&[0], &[]),
+            coverage: cov1,
             mutation_count: 0,
         },
         CorpusEntry {
+            cached_nonzero: cov2.total_nonzero(),
             program: Program::new(),
-            coverage: make_coverage(&(0..50).collect::<Vec<_>>(), &[]),
+            coverage: cov2,
             mutation_count: 0,
         },
     ];
@@ -133,15 +141,19 @@ fn weighted_scheduler_favors_more_coverage() {
 
 #[test]
 fn weighted_scheduler_penalizes_high_mutation_count() {
+    let cov1 = make_coverage(&(0..50).collect::<Vec<_>>(), &[]);
+    let cov2 = make_coverage(&(0..50).collect::<Vec<_>>(), &[]);
     let entries = vec![
         CorpusEntry {
+            cached_nonzero: cov1.total_nonzero(),
             program: Program::new(),
-            coverage: make_coverage(&(0..50).collect::<Vec<_>>(), &[]),
+            coverage: cov1,
             mutation_count: 0,
         },
         CorpusEntry {
+            cached_nonzero: cov2.total_nonzero(),
             program: Program::new(),
-            coverage: make_coverage(&(0..50).collect::<Vec<_>>(), &[]),
+            coverage: cov2,
             mutation_count: 100,
         },
     ];
@@ -164,15 +176,19 @@ fn weighted_scheduler_penalizes_high_mutation_count() {
 
 #[test]
 fn focused_scheduler_favors_gc_coverage() {
+    let cov1 = make_coverage(&[], &[0]);
+    let cov2 = make_coverage(&[], &(0..30).collect::<Vec<_>>());
     let entries = vec![
         CorpusEntry {
+            cached_nonzero: cov1.total_nonzero(),
             program: Program::new(),
-            coverage: make_coverage(&[], &[0]),
+            coverage: cov1,
             mutation_count: 0,
         },
         CorpusEntry {
+            cached_nonzero: cov2.total_nonzero(),
             program: Program::new(),
-            coverage: make_coverage(&[], &(0..30).collect::<Vec<_>>()),
+            coverage: cov2,
             mutation_count: 0,
         },
     ];

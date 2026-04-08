@@ -20,7 +20,7 @@ impl CorpusScheduler for WeightedScheduler {
         let weights: Vec<f64> = entries
             .iter()
             .map(|e| {
-                let unique = e.coverage.total_nonzero() as f64;
+                let unique = e.cached_nonzero as f64;
                 unique / (1.0 + e.mutation_count as f64)
             })
             .collect();

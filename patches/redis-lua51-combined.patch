@@ -115,7 +115,7 @@ index ae7d8c965f6e..89a96241d061 100644
  
  
  /*
-@@ -40,6 +139,36 @@
+@@ -40,6 +139,44 @@
  
  
  
@@ -123,18 +123,26 @@ index ae7d8c965f6e..89a96241d061 100644
 +
 +static double fuzzilua_alloc_fail_prob = 0.0;
 +static unsigned int fuzzilua_alloc_fail_seed = 0;
-+static int fuzzilua_alloc_fail_inited = 0;
++static int fuzzilua_alloc_fail_active = 0;
++static unsigned int fuzzilua_alloc_warmup = 0;
++
++#ifndef FUZZILUA_ALLOC_WARMUP_COUNT
++#define FUZZILUA_ALLOC_WARMUP_COUNT 50000
++#endif
 +
 +static void fuzzilua_alloc_fail_init(void) {
-+    if (fuzzilua_alloc_fail_inited)
++    if (fuzzilua_alloc_fail_active)
 +        return;
-+    fuzzilua_alloc_fail_inited = 1;
++
++    if (++fuzzilua_alloc_warmup < FUZZILUA_ALLOC_WARMUP_COUNT)
++        return;
 +
 +    const char *env = getenv("FUZZILUA_ALLOC_FAIL_PROB");
 +    if (env && env[0] != '\0')
 +        fuzzilua_alloc_fail_prob = strtod(env, NULL);
 +
 +    fuzzilua_alloc_fail_seed = (unsigned int)getpid() ^ 0xdeadbeef;
++    fuzzilua_alloc_fail_active = 1;
 +}
 +
 +static int fuzzilua_should_fail(void) {

@@ -8,6 +8,46 @@ set -euo pipefail
 #   ./night-run.sh                  # start fuzzer + overseer loop
 #   ./night-run.sh --overseer-only  # attach overseer to already-running fuzzer
 #   ./night-run.sh --stop           # gracefully stop everything
+#
+# Fuzzer tuning rationale (targeting CVSS 9+ Lua GC bugs):
+#
+#   --jobs 10           Leave 2 cores free for Redis children + OS overhead.
+#                       12 workers on 12 cores causes thrashing when each
+#                       worker has its own Redis child process.
+#
+#   --generation-ratio 0.1
+#                       Only 10% fresh generation, 90% mutation from corpus.
+#                       The corpus is seeded; overnight we need exploitation
+#                       depth, not breadth. Fresh programs rarely beat
+#                       evolved corpus entries for coverage.
+#
+#   --timeout 3s        Most Lua scripts finish in <100ms. A 5s timeout
+#                       wastes cycles on infinite loops. 3s catches complex
+#                       GC chains while dropping obvious hangs faster.
+#
+#   --alloc-fail-prob 0.02
+#                       2% chance of allocation failure in Lua's allocator.
+#                       This exercises error recovery paths (luaD_throw on
+#                       LUA_ERRMEM) which are prime UaF/double-free territory.
+#                       Higher values cause too many benign OOM crashes.
+#
+#   --no-minimize       Minimization runs 3x stable_coverage + instruction
+#                       removal per new-coverage input. At ~5ms/EVAL that's
+#                       20-100ms per minimization. With 10 workers finding
+#                       new coverage constantly in early phases, this is
+#                       ~30% of total CPU. Disable for throughput; the
+#                       overnight corpus will be compacted anyway.
+#
+#   --stats-interval 30s
+#                       Low enough to track progress, high enough to not
+#                       pollute the stats file (2880 lines over 24h).
+#
+# The GC stress patch (FUZZILUA_GC_STRESS_INTERVAL=1) forces GC threshold
+# to totalbytes on every allocation, meaning collectgarbage() and allocation
+# pressure hit the GC at maximum frequency. Combined with alloc-fail
+# injection, this maximizes the chance of hitting GC-lifecycle bugs:
+# use-after-free in sweep, type confusion in propagate, double-free on
+# error recovery, buffer overflow during table rehash under memory pressure.
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,7 +55,7 @@ cd "$SCRIPT_DIR"
 
 # --- Config (override via env) ---
 REDIS_BIN="${REDIS_BIN:-target/redis/redis-server}"
-WORKERS="${WORKERS:-12}"
+WORKERS="${WORKERS:-10}"
 CORPUS_DIR="${CORPUS_DIR:-corpus}"
 STATS_JSON="${STATS_JSON:-night-stats.jsonl}"
 CHECK_INTERVAL="${CHECK_INTERVAL:-900}"   # 15 minutes
@@ -26,6 +66,9 @@ FUZZER_LOG="${NIGHT_DIR}/fuzzer.log"
 FUZZER_PID_FILE="${NIGHT_DIR}/fuzzer.pid"
 OVERSEER_PID_FILE="${NIGHT_DIR}/overseer.pid"
 MAX_HOURS="${MAX_HOURS:-10}"
+GENERATION_RATIO="${GENERATION_RATIO:-0.1}"
+TIMEOUT="${TIMEOUT:-3s}"
+ALLOC_FAIL_PROB="${ALLOC_FAIL_PROB:-0.02}"
 
 # --- Helpers ---
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
@@ -33,19 +76,16 @@ die() { log "ERROR: $*" >&2; exit 1; }
 
 cleanup() {
     log "Cleaning up..."
-    # Stop overseer
     if [[ -f "$OVERSEER_PID_FILE" ]]; then
         kill "$(cat "$OVERSEER_PID_FILE")" 2>/dev/null || true
         rm -f "$OVERSEER_PID_FILE"
     fi
-    # Gracefully stop fuzzer (SIGINT -> clean shutdown)
     if [[ -f "$FUZZER_PID_FILE" ]]; then
         local pid
         pid="$(cat "$FUZZER_PID_FILE")"
         if kill -0 "$pid" 2>/dev/null; then
             log "Sending SIGINT to fuzzer (pid $pid)..."
             kill -INT "$pid" 2>/dev/null || true
-            # Wait up to 30s for graceful shutdown
             for _ in $(seq 1 30); do
                 kill -0 "$pid" 2>/dev/null || break
                 sleep 1
@@ -82,7 +122,6 @@ command -v cargo >/dev/null || die "cargo not found in PATH"
 
 mkdir -p "$NIGHT_DIR" "$RUNS_DIR" "$CORPUS_DIR"
 
-# Initialize memory file if it doesn't exist
 if [[ ! -f "$MEMORY_FILE" ]]; then
     cat > "$MEMORY_FILE" << 'EOF'
 # Fuzzilua Night Run - Overseer Memory
@@ -108,19 +147,26 @@ if [[ "$OVERSEER_ONLY" == false ]]; then
         die "Fuzzer already running (pid $(cat "$FUZZER_PID_FILE")). Use --overseer-only or --stop first."
     fi
 
-    log "Starting fuzzer: $WORKERS workers, corpus=$CORPUS_DIR, stats=$STATS_JSON"
+    log "Starting fuzzer:"
+    log "  workers=$WORKERS gen_ratio=$GENERATION_RATIO timeout=$TIMEOUT"
+    log "  alloc_fail=$ALLOC_FAIL_PROB minimize=off"
+    log "  corpus=$CORPUS_DIR stats=$STATS_JSON"
+
     cargo run --release -- \
         --redis-bin "$REDIS_BIN" \
         --jobs "$WORKERS" \
         --corpus "$CORPUS_DIR" \
         --stats-json "$STATS_JSON" \
         --stats-interval 30s \
+        --generation-ratio "$GENERATION_RATIO" \
+        --timeout "$TIMEOUT" \
+        --alloc-fail-prob "$ALLOC_FAIL_PROB" \
+        --no-minimize \
         > "$FUZZER_LOG" 2>&1 &
     FUZZER_PID=$!
     echo "$FUZZER_PID" > "$FUZZER_PID_FILE"
     log "Fuzzer started (pid $FUZZER_PID), logging to $FUZZER_LOG"
 
-    # Give it a few seconds to start up
     sleep 5
     if ! kill -0 "$FUZZER_PID" 2>/dev/null; then
         log "Fuzzer died immediately! Last output:"
@@ -143,7 +189,6 @@ log "  Runs dir: $RUNS_DIR"
 log "  Memory:   $MEMORY_FILE"
 
 while true; do
-    # Check if we've exceeded max runtime
     NOW_TS=$(date +%s)
     ELAPSED=$(( NOW_TS - START_TS ))
     if (( ELAPSED >= MAX_SECS )); then
@@ -151,10 +196,9 @@ while true; do
         break
     fi
 
-    # Sleep until next check
-    sleep "$CHECK_INTERVAL"
+    sleep "$CHECK_INTERVAL" &
+    wait $! 2>/dev/null || true
 
-    # Check if fuzzer is still alive
     FUZZER_ALIVE=true
     if [[ -f "$FUZZER_PID_FILE" ]]; then
         if ! kill -0 "$(cat "$FUZZER_PID_FILE")" 2>/dev/null; then
@@ -169,7 +213,6 @@ while true; do
 
     log "=== Overseer check #${RUN_NUM} (${RUN_ID}) ==="
 
-    # Gather context for maki
     STATS_TAIL=""
     if [[ -f "$STATS_JSON" ]]; then
         STATS_TAIL="$(tail -5 "$STATS_JSON" 2>/dev/null || echo '(no stats yet)')"
@@ -194,7 +237,6 @@ while true; do
         MEMORY_CONTENTS="$(cat "$MEMORY_FILE")"
     fi
 
-    # Build the prompt
     PROMPT="$(cat << PROMPT_EOF
 You are the overnight overseer for fuzzilua, a Lua VM fuzzer targeting Redis's embedded Lua 5.1.
 This is check #${RUN_NUM} at ${TIMESTAMP}. The fuzzer has been running for $((ELAPSED / 60)) minutes.
@@ -208,13 +250,20 @@ YOUR TASKS:
 5. Check disk usage - warn if corpus or stats file is growing too fast.
 6. Update the memory file (${MEMORY_FILE}) with your findings, keeping a running log.
 
+WHAT MAKES A REAL CVSS 9+ CRASH:
+- ASan: heap-use-after-free, heap-buffer-overflow, stack-buffer-overflow with stack traces through lua* / luaC_* / luaV_* / luaH_* functions
+- Signals: SIGSEGV, SIGABRT with lua stack frames (not Redis module frames)
+- The bug must be triggerable via EVAL (unauthenticated in default Redis config = network-accessible = CVSS 9+)
+- Double-free in GC sweep, type confusion in luaV_execute, buffer overflow in table rehash
+- NOT: UBSan "incorrect function type" from RM_GetApi/VectorSets (known false positive)
+- NOT: OOM crashes from alloc-fail injection (signal=0, no ASan report, just LUA_ERRMEM)
+- NOT: Timeouts or connection lost
+
 IMPORTANT RULES:
 - Only READ files. Do NOT modify any fuzzer code or corpus entries.
 - DO update ${MEMORY_FILE} with your analysis.
 - The output of this run will be saved to ${RUN_FILE}.
 - Be concise. Focus on actionable findings.
-- UBSan "call through incorrect function type" from RM_GetApi in VectorSets is a KNOWN FALSE POSITIVE - skip these.
-- Real crashes will have ASan reports (heap-use-after-free, heap-buffer-overflow, stack-buffer-overflow) or signals (SIGSEGV, SIGABRT with meaningful stack traces through lua* functions).
 
 PERSISTENT MEMORY (from previous checks):
 ---
@@ -237,7 +286,6 @@ CORPUS ENTRIES: ${CORPUS_COUNT}
 PROMPT_EOF
 )"
 
-    # Run maki headless
     log "Running maki overseer..."
     MAKI_OUTPUT="$(maki "$PROMPT" \
         --print \
@@ -246,7 +294,6 @@ PROMPT_EOF
         --allowed-tools Read,Glob,Grep,Bash,Edit \
         2>/dev/null || echo '{"result": "maki failed to run", "is_error": true}')"
 
-    # Extract the result text
     RESULT_TEXT="$(echo "$MAKI_OUTPUT" | python3 -c "
 import sys, json
 try:
@@ -265,7 +312,6 @@ except:
     print('unknown')
 " 2>/dev/null || echo 'unknown')"
 
-    # Save run report
     cat > "$RUN_FILE" << RUN_EOF
 # Overseer Check #${RUN_NUM}
 - **Time**: ${TIMESTAMP}
@@ -279,7 +325,6 @@ RUN_EOF
 
     log "Check #${RUN_NUM} complete. Cost: ${COST}. Saved to ${RUN_FILE}"
 
-    # If fuzzer died, do one final check then exit
     if [[ "$FUZZER_ALIVE" == false ]]; then
         log "Fuzzer is no longer running. Exiting overseer."
         break

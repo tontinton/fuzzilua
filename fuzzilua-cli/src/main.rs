@@ -45,13 +45,13 @@ fn main() -> Result<()> {
 }
 
 fn run_reproduce(cli: &Cli, path: &std::path::Path) -> Result<()> {
-    let mut target = RedisTarget::spawn(make_redis_config(cli)?)?;
+    let mut target = RedisTarget::spawn(make_redis_config(cli, false)?)?;
     let crashed = reproduce::reproduce(&mut target, path)?;
     std::process::exit(if crashed { 0 } else { 1 });
 }
 
 fn run_minimize_crash(cli: &Cli, path: &std::path::Path) -> Result<()> {
-    let mut target = RedisTarget::spawn(make_redis_config(cli)?)?;
+    let mut target = RedisTarget::spawn(make_redis_config(cli, false)?)?;
     let minimized = reproduce::minimize_crash(&mut target, path)?;
 
     let out_path = path.with_extension("minimized.bin");
@@ -73,7 +73,7 @@ fn run_fuzz(cli: &Cli) -> Result<()> {
     let jobs = cli.jobs;
     info!(workers = jobs, "starting fuzzing");
 
-    let mut seed_target = RedisTarget::spawn(make_redis_config(cli)?)?;
+    let mut seed_target = RedisTarget::spawn(make_redis_config(cli, false)?)?;
     let mut seed_corpus = load_or_create_corpus(cli)?;
     let mut seed_rng = rand::rng();
 
@@ -114,7 +114,7 @@ fn run_fuzz(cli: &Cli) -> Result<()> {
     for worker_id in 0..jobs {
         let shared = Arc::clone(&shared);
         let engine = Arc::clone(&engine);
-        let redis_config = make_redis_config(cli)?;
+        let redis_config = make_redis_config(cli, true)?;
         let config = WorkerConfig {
             max_iters: cli.max_iters,
             crash_dir: crash_dir.clone(),
@@ -181,7 +181,7 @@ fn run_fuzz(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-fn make_redis_config(cli: &Cli) -> Result<RedisConfig> {
+fn make_redis_config(cli: &Cli, enable_alloc_fail: bool) -> Result<RedisConfig> {
     let binary = cli
         .redis_bin
         .clone()
@@ -195,7 +195,9 @@ fn make_redis_config(cli: &Cli) -> Result<RedisConfig> {
     }
     .with_random_port();
 
-    if let Some(prob) = cli.alloc_fail_prob {
+    if enable_alloc_fail
+        && let Some(prob) = cli.alloc_fail_prob
+    {
         config
             .extra_env
             .push((ENV_ALLOC_FAIL_PROB.into(), prob.to_string()));

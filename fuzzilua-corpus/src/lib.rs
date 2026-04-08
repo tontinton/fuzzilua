@@ -15,14 +15,13 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tracing::{debug, info, warn};
 
-const COMPACT_INTERVAL: u32 = 100;
-const MAX_CORPUS_ENTRIES: usize = 10_000;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CorpusEntry {
     pub program: Program,
     pub coverage: CoverageBitmap,
     pub mutation_count: u32,
+    #[serde(default)]
+    pub cached_nonzero: u32,
 }
 
 pub struct Corpus {
@@ -30,7 +29,6 @@ pub struct Corpus {
     global_coverage: CoverageBitmap,
     scheduler: Box<dyn CorpusScheduler>,
     dir: PathBuf,
-    additions_since_compact: u32,
 }
 
 impl Corpus {
@@ -45,7 +43,6 @@ impl Corpus {
             global_coverage: CoverageBitmap::new(edge_size, gc_size),
             scheduler,
             dir: dir.into(),
-            additions_since_compact: 0,
         }
     }
 
@@ -57,6 +54,7 @@ impl Corpus {
         coverage.merge_into(&mut self.global_coverage);
 
         let entry = CorpusEntry {
+            cached_nonzero: coverage.total_nonzero(),
             program,
             coverage,
             mutation_count: 0,
@@ -67,14 +65,6 @@ impl Corpus {
         }
 
         self.entries.push(entry);
-
-        self.additions_since_compact += 1;
-        if self.additions_since_compact >= COMPACT_INTERVAL
-            || self.entries.len() > MAX_CORPUS_ENTRIES
-        {
-            self.compact();
-            self.additions_since_compact = 0;
-        }
 
         debug!(corpus_size = self.entries.len(), "added new corpus entry");
         true
@@ -113,6 +103,7 @@ impl Corpus {
     pub fn add_unchecked(&mut self, program: Program, coverage: CoverageBitmap) {
         coverage.merge_into(&mut self.global_coverage);
         let entry = CorpusEntry {
+            cached_nonzero: coverage.total_nonzero(),
             program,
             coverage,
             mutation_count: 0,
@@ -121,13 +112,6 @@ impl Corpus {
             warn!("failed to persist corpus entry: {e}");
         }
         self.entries.push(entry);
-        self.additions_since_compact += 1;
-        if self.additions_since_compact >= COMPACT_INTERVAL
-            || self.entries.len() > MAX_CORPUS_ENTRIES
-        {
-            self.compact();
-            self.additions_since_compact = 0;
-        }
     }
     pub fn add_blind(&mut self, program: Program) {
         let coverage = CoverageBitmap::new(
@@ -135,6 +119,7 @@ impl Corpus {
             self.global_coverage.gc_len(),
         );
         let entry = CorpusEntry {
+            cached_nonzero: 0,
             program,
             coverage,
             mutation_count: 0,
@@ -153,16 +138,23 @@ impl Corpus {
             if !keep[i] {
                 continue;
             }
+            let nz_i = self.entries[i].cached_nonzero;
             for j in (i + 1)..before {
                 if !keep[j] {
                     continue;
                 }
-                let j_sub_i = self.entries[j]
-                    .coverage
-                    .is_subset_of(&self.entries[i].coverage);
-                let i_sub_j = self.entries[i]
-                    .coverage
-                    .is_subset_of(&self.entries[j].coverage);
+                let nz_j = self.entries[j].cached_nonzero;
+                // Quick check: if J has more nonzero bits than I, J can't be
+                // a subset of I (and vice versa). Skip the expensive bitmap
+                // scan for the impossible direction.
+                let j_sub_i = nz_j <= nz_i
+                    && self.entries[j]
+                        .coverage
+                        .is_subset_of(&self.entries[i].coverage);
+                let i_sub_j = nz_i <= nz_j
+                    && self.entries[i]
+                        .coverage
+                        .is_subset_of(&self.entries[j].coverage);
                 if j_sub_i && !i_sub_j {
                     keep[j] = false;
                 } else if i_sub_j && !j_sub_i {

@@ -60,14 +60,14 @@ if [ -n "$GCC_LIB_DIR" ] && [ -d "$GCC_LIB_DIR" ]; then
     GCC_FLAG="--gcc-install-dir=$GCC_LIB_DIR"
 fi
 
-CFLAGS="-fsanitize=address,undefined -fsanitize-coverage=trace-pc-guard"
+CFLAGS="-fsanitize=address -fno-sanitize-recover=address -fsanitize-coverage=trace-pc-guard"
 CFLAGS="$CFLAGS -DFUZZILUA_GC_STRESS -DFUZZILUA_GC_STRESS_INTERVAL=1 -DFUZZILUA_GC_STRESS_MODE=1"
 CFLAGS="$CFLAGS -DFUZZILUA_BITMAP_SIZE=${BITMAP_SIZE}"
 [ "$ENABLE_ALLOC_FAIL" = "1" ] && CFLAGS="$CFLAGS -DFUZZILUA_ALLOC_FAIL"
 CFLAGS="$CFLAGS -g -O1 -fno-omit-frame-pointer"
 [ -n "$GCC_FLAG" ] && CFLAGS="$CFLAGS $GCC_FLAG"
 
-LDFLAGS="-fsanitize=address,undefined -lrt"
+LDFLAGS="-fsanitize=address -lrt"
 [ -n "$GCC_LIB_DIR" ] && LDFLAGS="$LDFLAGS -L$GCC_LIB_DIR"
 
 echo "=== fuzzilua: building instrumented Redis ==="

@@ -35,7 +35,6 @@ pub enum ExecStatus {
 pub struct CrashInfo {
     pub signal: Option<i32>,
     pub asan_report: Option<String>,
-    pub ubsan_report: Option<String>,
     pub script: String,
 }
 

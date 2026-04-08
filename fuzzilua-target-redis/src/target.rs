@@ -115,6 +115,10 @@ impl RedisTarget {
 
         cmd.env(ENV_SHM_EDGE, &self.shm_name);
         cmd.env(ENV_SHM_GC, &self.shm_name);
+        cmd.env(
+            "ASAN_OPTIONS",
+            "detect_leaks=0:abort_on_error=1:symbolize=1",
+        );
 
         for (key, val) in &self.config.extra_env {
             cmd.env(key, val);
@@ -132,6 +136,9 @@ impl RedisTarget {
         self.child = Some(child);
 
         self.wait_for_ready()?;
+
+        // Discard startup stderr (UBSan noise from module loading, etc.)
+        self.drain_stderr();
 
         let stream = TcpStream::connect((&*self.config.bind, self.config.port))
             .map_err(|e| TargetError::ConnectionFailed(e.to_string()))?;
@@ -175,9 +182,9 @@ impl RedisTarget {
         lines.join("\n")
     }
 
-    fn check_sanitizer_reports(&self, stderr: &str) -> (Option<String>, Option<String>) {
+    fn check_sanitizer_report(&self, stderr: &str) -> Option<String> {
         let lines: Vec<&str> = stderr.lines().collect();
-        (find_asan_report(&lines), find_ubsan_report(&lines))
+        find_asan_report(&lines)
     }
 
     /// Reap the child if not already reaped. Returns true if still running.
@@ -205,14 +212,13 @@ impl RedisTarget {
 
         if !alive {
             let signal = self.exit_signal();
-            let (asan_report, ubsan_report) = self.check_sanitizer_reports(&stderr);
+            let asan_report = self.check_sanitizer_report(&stderr);
 
-            if signal.is_some() || asan_report.is_some() || ubsan_report.is_some() {
+            if signal.is_some() || asan_report.is_some() {
                 return Execution {
                     status: ExecStatus::Crash(CrashInfo {
                         signal,
                         asan_report,
-                        ubsan_report,
                         script: script.to_string(),
                     }),
                     stderr,
@@ -342,14 +348,13 @@ impl Target for RedisTarget {
             Ok(resp) => {
                 self.consecutive_timeouts = 0;
                 let stderr = self.drain_stderr();
-                let (asan_report, ubsan_report) = self.check_sanitizer_reports(&stderr);
+                let asan_report = self.check_sanitizer_report(&stderr);
 
-                if asan_report.is_some() || ubsan_report.is_some() {
+                if asan_report.is_some() {
                     return Ok(Execution {
                         status: ExecStatus::Crash(CrashInfo {
                             signal: None,
                             asan_report,
-                            ubsan_report,
                             script: script.to_string(),
                         }),
                         stderr,
@@ -436,7 +441,7 @@ fn find_asan_report(lines: &[&str]) -> Option<String> {
     let mut in_report = false;
 
     for line in lines {
-        if line.contains("ERROR: AddressSanitizer") || line.contains("ERROR: LeakSanitizer") {
+        if line.contains("ERROR: AddressSanitizer") {
             in_report = true;
         }
         if in_report {
@@ -454,19 +459,6 @@ fn find_asan_report(lines: &[&str]) -> Option<String> {
     }
 }
 
-fn find_ubsan_report(lines: &[&str]) -> Option<String> {
-    let mut report = Vec::new();
-    for line in lines {
-        if line.contains("runtime error:") {
-            report.push(*line);
-        }
-    }
-    if report.is_empty() {
-        None
-    } else {
-        Some(report.join("\n"))
-    }
-}
 
 /// Pick an available port. Inherent TOCTOU race: the port may be taken between
 /// our bind and Redis's bind. Acceptable for fuzzer workers; retry on spawn failure.
@@ -497,16 +489,5 @@ mod tests {
     #[test]
     fn find_asan_report_returns_none_for_clean_output() {
         assert!(find_asan_report(&["normal output"]).is_none());
-    }
-
-    #[test]
-    fn find_ubsan_report_extracts_runtime_errors() {
-        let lines = vec![
-            "normal line",
-            "src/foo.c:42:5: runtime error: signed integer overflow",
-        ];
-        let report = find_ubsan_report(&lines).unwrap();
-        assert!(report.contains("runtime error:"));
-        assert!(find_ubsan_report(&["normal line"]).is_none());
     }
 }

@@ -227,7 +227,6 @@ fn crash_detection_with_mock_target() {
     let crash_info = CrashInfo {
         signal: Some(11),
         asan_report: Some("ERROR: AddressSanitizer: heap-use-after-free\nSUMMARY: boom".into()),
-        ubsan_report: None,
         script: String::new(),
     };
 
