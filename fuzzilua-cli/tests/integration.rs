@@ -181,6 +181,8 @@ fn crash_detection_with_mock_target() {
     let config = fuzzilua_cli::FuzzerConfig {
         max_iters: Some(5),
         crash_dir: crash_dir.clone(),
+        minimize: false,
+        generation_ratio: 0.0,
     };
 
     let stats = fuzzilua_cli::run_fuzzer_loop(

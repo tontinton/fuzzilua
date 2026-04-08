@@ -1,5 +1,5 @@
+use crate::bitset::VarBitset;
 use crate::types::{Instruction, Op, Program, Variable};
-use std::collections::HashSet;
 use std::fmt::Write;
 
 const INDENT: &str = "  ";
@@ -7,7 +7,8 @@ const INDENT: &str = "  ";
 pub fn lift(program: &Program) -> String {
     let mut out = String::new();
     let mut depth: usize = 0;
-    let mut declared: HashSet<Variable> = HashSet::new();
+    // VarBitset instead of HashSet<Variable>: same rationale as validate.rs.
+    let mut declared = VarBitset::with_capacity(program.next_var);
 
     for instr in &program.instructions {
         lift_instruction(instr, &mut out, &mut depth, &mut declared);
@@ -21,7 +22,7 @@ fn indent(out: &mut String, depth: usize) {
     }
 }
 
-fn declare(out: &mut String, v: Variable, declared: &mut HashSet<Variable>) {
+fn declare(out: &mut String, v: Variable, declared: &mut VarBitset) {
     if declared.insert(v) {
         out.push_str("local ");
     }
@@ -38,7 +39,7 @@ fn emit_assign(
     out: &mut String,
     depth: usize,
     output: Variable,
-    declared: &mut HashSet<Variable>,
+    declared: &mut VarBitset,
     rhs: std::fmt::Arguments<'_>,
 ) {
     indent(out, depth);
@@ -52,7 +53,7 @@ fn declare_multi_assign(
     out: &mut String,
     depth: usize,
     outputs: &[Variable],
-    declared: &mut HashSet<Variable>,
+    declared: &mut VarBitset,
     rhs: &str,
 ) {
     indent(out, depth);
@@ -101,7 +102,7 @@ fn lift_instruction(
     instr: &Instruction,
     out: &mut String,
     depth: &mut usize,
-    declared: &mut HashSet<Variable>,
+    declared: &mut VarBitset,
 ) {
     let inp = &instr.inputs;
     let outp = &instr.outputs;

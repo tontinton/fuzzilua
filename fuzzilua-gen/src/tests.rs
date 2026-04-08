@@ -1,5 +1,5 @@
 use crate::builder::ProgramBuilder;
-use crate::{all_generators, generate_program};
+use crate::{all_generators, all_templates, generate_program};
 use fuzzilua_ir::{LuaType, Op, lift};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -180,5 +180,64 @@ fn fuzz_generate_program() {
             max_observed <= 5,
             "program {i}: nesting depth {max_observed} exceeds max 5"
         );
+    }
+}
+
+// -- Template tests ----------------------------------------------------------
+
+#[test_case("metamethod_stress")]
+#[test_case("parse_reentry")]
+#[test_case("sort_exploit")]
+#[test_case("gsub_reentry")]
+#[test_case("concat_chain")]
+#[test_case("coroutine_gc")]
+#[test_case("cjson_metamethod")]
+#[test_case("metatable_nesting")]
+#[test_case("upvalue_lifetime")]
+fn template_produces_valid_ir(name: &str) {
+    let templates = all_templates();
+    let generators = all_generators();
+    let t = templates
+        .iter()
+        .find(|t| t.name() == name)
+        .unwrap_or_else(|| panic!("unknown template: {name}"));
+    let mut b = ProgramBuilder::new(200, 5);
+    let mut rng = StdRng::seed_from_u64(42);
+    t.generate(&mut b, &generators, &mut rng);
+    let prog = b.finish();
+    let lua = lift(&prog);
+    assert!(
+        prog.validate().is_ok(),
+        "template {name} produced invalid IR"
+    );
+    assert!(!lua.is_empty(), "template {name} lifted to empty Lua");
+}
+
+#[test]
+fn each_template_100_valid_programs() {
+    let templates = all_templates();
+    let generators = all_generators();
+    let budgets = [20, 50, 200, 500];
+
+    for template in &templates {
+        for seed in 0..100u64 {
+            let budget = budgets[seed as usize % budgets.len()];
+            let mut rng = StdRng::seed_from_u64(seed);
+            let mut b = ProgramBuilder::new(budget, 5);
+            template.generate(&mut b, &generators, &mut rng);
+            let prog = b.finish();
+            if let Err(errors) = prog.validate() {
+                panic!(
+                    "template '{}' budget={budget} seed={seed} failed validation: {errors:?}",
+                    template.name()
+                );
+            }
+            let lua = lift(&prog);
+            assert!(
+                !lua.is_empty(),
+                "template '{}' seed={seed} lifted to empty Lua",
+                template.name()
+            );
+        }
     }
 }

@@ -21,7 +21,7 @@ fuzzilua-target = { path = "fuzzilua-target" }
 fuzzilua-target-redis = { path = "fuzzilua-target-redis" }
 
 rand = "0.9"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 bincode = "1"
 memmap2 = "0.9"
 clap = { version = "4", features = ["derive"] }

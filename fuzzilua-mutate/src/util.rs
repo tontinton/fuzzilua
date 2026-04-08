@@ -47,11 +47,23 @@ pub fn random_insertion_point(program: &Program, rng: &mut dyn RngCore) -> usize
     rng.random_range(0..=program.instructions.len())
 }
 
+const MAX_SPLICE_RANGES: usize = 500;
+
+/// Finds self-contained, block-balanced sub-ranges for splicing.
+/// Ensures the block depth never drops below the starting depth within a range,
+/// preventing extraction of partial blocks (e.g. an EndIf without its BeginIf).
 pub fn find_balanced_splice_ranges(instructions: &[Instruction]) -> Vec<(usize, usize)> {
     let len = instructions.len();
     if len == 0 {
         return vec![];
     }
+
+    let max_var = instructions
+        .iter()
+        .flat_map(|i| i.outputs.iter().chain(i.inputs.iter()))
+        .map(|v| v.0 as usize)
+        .max()
+        .unwrap_or(0);
 
     let mut ranges = Vec::new();
     let mut block_depth = vec![0i32; len + 1];
@@ -67,31 +79,45 @@ pub fn find_balanced_splice_ranges(instructions: &[Instruction]) -> Vec<(usize, 
         block_depth[i + 1] = depth;
     }
 
-    #[allow(clippy::needless_range_loop)]
-    for start in 0..len {
-        for end in (start + 1)..=len {
-            if block_depth[end] == block_depth[start]
-                && is_self_contained(&instructions[start..end])
-            {
+    // Generation-counter approach: bumping `gen` each outer iteration avoids
+    // clearing the whole array. A variable is "defined" when its entry == gen.
+    let mut defined_gen = vec![0u32; max_var + 1];
+    let mut generation = 0u32;
+
+    'outer: for start in 0..len {
+        generation = generation.wrapping_add(1);
+        if generation == 0 {
+            defined_gen.fill(0);
+            generation = 1;
+        }
+
+        let start_depth = block_depth[start];
+        let mut min_depth = start_depth;
+
+        for (end_idx, instr) in instructions[start..].iter().enumerate() {
+            let end_idx = start + end_idx;
+
+            for v in &instr.inputs {
+                if defined_gen[v.0 as usize] != generation {
+                    continue 'outer;
+                }
+            }
+
+            for v in &instr.outputs {
+                defined_gen[v.0 as usize] = generation;
+            }
+
+            let end = end_idx + 1;
+            min_depth = min_depth.min(block_depth[end]);
+
+            if block_depth[end] == start_depth && min_depth >= start_depth {
                 ranges.push((start, end));
+                if ranges.len() >= MAX_SPLICE_RANGES {
+                    return ranges;
+                }
             }
         }
     }
 
     ranges
-}
-
-fn is_self_contained(slice: &[Instruction]) -> bool {
-    let mut defined = std::collections::HashSet::new();
-    for instr in slice {
-        for v in &instr.inputs {
-            if !defined.contains(v) {
-                return false;
-            }
-        }
-        for v in &instr.outputs {
-            defined.insert(*v);
-        }
-    }
-    true
 }

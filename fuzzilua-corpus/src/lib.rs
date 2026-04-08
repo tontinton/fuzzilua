@@ -1,10 +1,12 @@
 mod error;
+mod minimize;
 mod persist;
 mod scheduler;
 
 pub use error::CorpusError;
+pub use minimize::minimize;
 pub use persist::save_crash;
-pub use scheduler::{CorpusScheduler, UniformScheduler, WeightedScheduler};
+pub use scheduler::{CorpusScheduler, FocusedScheduler, UniformScheduler, WeightedScheduler};
 
 use fuzzilua_coverage::CoverageBitmap;
 use fuzzilua_ir::Program;

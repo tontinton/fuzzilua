@@ -1,9 +1,13 @@
 use fuzzilua_coverage::CoverageBitmap;
-use fuzzilua_ir::Program;
+use fuzzilua_ir::{BinOp, GcMode, Op, Program, Variable};
+use fuzzilua_target::{ExecStatus, MockTarget, SandboxConfig, Target, TargetError};
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 
-use crate::{Corpus, CorpusEntry, CorpusScheduler, UniformScheduler, WeightedScheduler};
+use crate::{
+    Corpus, CorpusEntry, CorpusScheduler, FocusedScheduler, UniformScheduler, WeightedScheduler,
+    minimize,
+};
 
 const EDGE_SIZE: usize = 64;
 const GC_SIZE: usize = 32;
@@ -37,30 +41,24 @@ fn add_and_coverage_tracking() {
     let mut corpus = make_corpus();
     assert_eq!(corpus.total_coverage(), (0, 0));
 
-    // new edge coverage accepted
     assert!(corpus.add(Program::new(), make_coverage(&[0, 1, 2], &[])));
     assert_eq!(corpus.len(), 1);
     assert_eq!(corpus.total_coverage(), (3, 0));
 
-    // subset rejected
     assert!(!corpus.add(Program::new(), make_coverage(&[0, 1], &[])));
     assert_eq!(corpus.len(), 1);
 
-    // identical rejected
     assert!(!corpus.add(Program::new(), make_coverage(&[0, 1, 2], &[])));
     assert_eq!(corpus.len(), 1);
 
-    // new bits accepted, coverage grows monotonically
     assert!(corpus.add(Program::new(), make_coverage(&[3], &[])));
     assert_eq!(corpus.len(), 2);
     assert_eq!(corpus.total_coverage(), (4, 0));
 
-    // gc-only coverage accepted
     assert!(corpus.add(Program::new(), make_coverage(&[], &[0])));
     assert_eq!(corpus.len(), 3);
     assert_eq!(corpus.total_coverage(), (4, 1));
 
-    // select returns valid entry from populated corpus
     let mut rng = SmallRng::seed_from_u64(42);
     let entry = corpus.select(&mut rng);
     assert!(entry.coverage.total_nonzero() > 0);
@@ -164,6 +162,37 @@ fn weighted_scheduler_penalizes_high_mutation_count() {
     );
 }
 
+#[test]
+fn focused_scheduler_favors_gc_coverage() {
+    let entries = vec![
+        CorpusEntry {
+            program: Program::new(),
+            coverage: make_coverage(&[], &[0]),
+            mutation_count: 0,
+        },
+        CorpusEntry {
+            program: Program::new(),
+            coverage: make_coverage(&[], &(0..30).collect::<Vec<_>>()),
+            mutation_count: 0,
+        },
+    ];
+
+    let scheduler = FocusedScheduler;
+    let mut rng = SmallRng::seed_from_u64(42);
+    let mut counts = [0u32; 2];
+
+    for _ in 0..10_000 {
+        counts[scheduler.select(&entries, &mut rng)] += 1;
+    }
+
+    assert!(
+        counts[1] > counts[0],
+        "entry with 30 gc_bits ({}) should be picked more than entry with 1 gc_bit ({})",
+        counts[1],
+        counts[0]
+    );
+}
+
 // --- Compaction tests ---
 
 #[test]
@@ -177,7 +206,6 @@ fn compact_evicts_strict_subsets() {
     corpus.add(Program::new(), make_coverage(&[4, 5], &[]));
     assert_eq!(corpus.len(), 3);
 
-    // make entry B a strict subset of A
     corpus.entries[1].coverage = make_coverage(&[0, 1], &[]);
     corpus.compact();
 
@@ -185,7 +213,6 @@ fn compact_evicts_strict_subsets() {
     assert_eq!(corpus.entries[0].coverage.count_bits(), (3, 0));
     assert_eq!(corpus.entries[1].coverage.count_bits(), (2, 0));
 
-    // verify compaction re-persisted
     let loaded = Corpus::load(Box::new(UniformScheduler), &corpus_dir, EDGE_SIZE, GC_SIZE).unwrap();
     assert_eq!(loaded.len(), 2);
 }
@@ -194,18 +221,15 @@ fn compact_evicts_strict_subsets() {
 fn compact_preserves_independent_entries() {
     let mut corpus = make_corpus();
 
-    // empty corpus: noop
     corpus.compact();
     assert_eq!(corpus.len(), 0);
 
-    // disjoint entries: all kept
     corpus.add(Program::new(), make_coverage(&[0], &[]));
     corpus.add(Program::new(), make_coverage(&[1], &[]));
     corpus.add(Program::new(), make_coverage(&[2], &[]));
     corpus.compact();
     assert_eq!(corpus.len(), 3);
 
-    // edge vs gc: different namespaces, not subsets of each other
     let dir = tempfile::tempdir().unwrap();
     let mut corpus2 = make_corpus_in(dir.path());
     corpus2.add(Program::new(), make_coverage(&[3], &[]));
@@ -230,7 +254,6 @@ fn save_and_load_roundtrip() {
     assert_eq!(loaded.len(), 5);
     assert_eq!(corpus.total_coverage(), loaded.total_coverage());
 
-    // no temp files left behind
     for entry in std::fs::read_dir(&corpus_dir).unwrap().flatten() {
         let name = entry.file_name();
         assert!(
@@ -298,4 +321,149 @@ fn load_nonexistent_dir_returns_empty() {
     )
     .unwrap();
     assert_eq!(loaded.len(), 0);
+}
+
+// --- Minimizer mock ---
+
+struct PersistentCoverageMock {
+    inner: MockTarget,
+    persistent_coverage: CoverageBitmap,
+}
+
+impl PersistentCoverageMock {
+    fn new(coverage: CoverageBitmap, exec_count: usize, edge_size: usize, gc_size: usize) -> Self {
+        let responses = vec![ExecStatus::Ok; exec_count];
+        let mut inner = MockTarget::new(responses, edge_size, gc_size);
+        let persistent_coverage = coverage.clone();
+        inner.set_coverage(coverage);
+        Self {
+            inner,
+            persistent_coverage,
+        }
+    }
+}
+
+impl Target for PersistentCoverageMock {
+    fn execute(&mut self, script: &str) -> Result<fuzzilua_target::Execution, TargetError> {
+        self.inner.execute(script)
+    }
+
+    fn reset(&mut self) -> Result<(), TargetError> {
+        self.inner.reset()?;
+        self.inner.set_coverage(self.persistent_coverage.clone());
+        Ok(())
+    }
+
+    fn restart(&mut self) -> Result<(), TargetError> {
+        self.inner.restart()?;
+        self.inner.set_coverage(self.persistent_coverage.clone());
+        Ok(())
+    }
+
+    fn collect_coverage(&self) -> CoverageBitmap {
+        self.inner.collect_coverage()
+    }
+
+    fn is_alive(&mut self) -> bool {
+        self.inner.is_alive()
+    }
+
+    fn sandbox(&self) -> &SandboxConfig {
+        self.inner.sandbox()
+    }
+}
+
+fn make_persistent_mock(edge_bits: &[usize]) -> PersistentCoverageMock {
+    let mut cov = CoverageBitmap::new(EDGE_SIZE, GC_SIZE);
+    for &i in edge_bits {
+        cov.edge_bytes_mut()[i] = 1;
+    }
+    PersistentCoverageMock::new(cov, 200, EDGE_SIZE, GC_SIZE)
+}
+
+// --- Minimizer tests ---
+
+#[test]
+fn minimize_nop_removal() {
+    let mut p = Program::new();
+    p.emit(Op::LoadInt(1), vec![], vec![Variable(0)]);
+    p.emit(Op::Nop, vec![], vec![]);
+    p.emit(Op::LoadInt(2), vec![], vec![Variable(1)]);
+    p.emit(Op::Nop, vec![], vec![]);
+    p.emit(Op::Nop, vec![], vec![]);
+    p.emit(
+        Op::BinaryOp(BinOp::Add),
+        vec![Variable(0), Variable(1)],
+        vec![Variable(2)],
+    );
+    p.next_var = 3;
+
+    let mut target = make_persistent_mock(&[0]);
+    let result = minimize(&p, &mut target);
+    assert!(
+        !result.instructions.iter().any(|i| matches!(i.op, Op::Nop)),
+        "minimized program should have no Nops"
+    );
+}
+
+#[test]
+fn minimize_gc_consolidation() {
+    let mut p = Program::new();
+    p.emit(Op::LoadInt(1), vec![], vec![Variable(0)]);
+    p.emit(Op::CollectGarbage(GcMode::Collect), vec![], vec![]);
+    p.emit(Op::CollectGarbage(GcMode::Step), vec![], vec![]);
+    p.emit(Op::CollectGarbage(GcMode::Collect), vec![], vec![]);
+    p.emit(Op::LoadInt(2), vec![], vec![Variable(1)]);
+    p.next_var = 2;
+
+    let mut target = make_persistent_mock(&[0]);
+    let result = minimize(&p, &mut target);
+    let gc_count = result
+        .instructions
+        .iter()
+        .filter(|i| matches!(i.op, Op::CollectGarbage(_)))
+        .count();
+    assert!(
+        gc_count <= 1,
+        "should consolidate to at most 1 GC, got {gc_count}"
+    );
+}
+
+#[test]
+fn minimize_dead_variable_elimination() {
+    let mut p = Program::new();
+    p.emit(Op::LoadInt(1), vec![], vec![Variable(0)]);
+    p.emit(Op::LoadInt(2), vec![], vec![Variable(1)]);
+    p.emit(Op::LoadInt(99), vec![], vec![Variable(2)]);
+    p.emit(Op::LoadInt(100), vec![], vec![Variable(3)]);
+    p.emit(Op::LoadInt(101), vec![], vec![Variable(4)]);
+    p.emit(
+        Op::BinaryOp(BinOp::Add),
+        vec![Variable(0), Variable(1)],
+        vec![Variable(5)],
+    );
+    p.next_var = 6;
+
+    let mut target = make_persistent_mock(&[0]);
+    let result = minimize(&p, &mut target);
+    let load_count = result
+        .instructions
+        .iter()
+        .filter(|i| matches!(i.op, Op::LoadInt(_)))
+        .count();
+    assert!(
+        load_count <= 3,
+        "dead variables should be eliminated, got {load_count}"
+    );
+}
+
+#[test]
+fn minimize_already_minimal_program() {
+    let mut p = Program::new();
+    p.emit(Op::LoadInt(1), vec![], vec![Variable(0)]);
+    p.next_var = 1;
+
+    let mut target = make_persistent_mock(&[0]);
+    let result = minimize(&p, &mut target);
+    assert_eq!(result.instructions.len(), p.instructions.len());
 }

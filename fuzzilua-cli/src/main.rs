@@ -65,6 +65,8 @@ fn run_fuzz(cli: &Cli) -> Result<()> {
     let config = FuzzerConfig {
         max_iters: cli.max_iters,
         crash_dir,
+        minimize: !cli.no_minimize,
+        generation_ratio: cli.generation_ratio,
     };
 
     let final_stats = fuzzilua_cli::run_fuzzer_loop(

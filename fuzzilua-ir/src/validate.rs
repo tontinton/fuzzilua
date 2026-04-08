@@ -1,5 +1,5 @@
-use crate::types::{BlockKind, Instruction, Op, Program, Variable};
-use std::collections::HashSet;
+use crate::bitset::VarBitset;
+use crate::types::{BlockKind, Instruction, Op, Program};
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,9 +35,11 @@ impl BlockKind {
 }
 
 impl Program {
+    // VarBitset instead of HashSet<Variable>: eliminates hashing overhead
+    // that was ~20% of the mutation engine's CPU time.
     pub fn validate(&self) -> Result<(), Vec<ValidationError>> {
         let mut errors = Vec::new();
-        let mut defined: HashSet<Variable> = HashSet::new();
+        let mut defined = VarBitset::with_capacity(self.next_var);
         let mut block_stack: Vec<(BlockKind, usize)> = Vec::new();
         let mut max_var: Option<u32> = None;
 
@@ -103,7 +105,7 @@ impl Program {
     fn check_inputs_defined(
         index: usize,
         instr: &Instruction,
-        defined: &HashSet<Variable>,
+        defined: &VarBitset,
         errors: &mut Vec<ValidationError>,
     ) {
         for v in &instr.inputs {
@@ -116,11 +118,7 @@ impl Program {
         }
     }
 
-    fn register_outputs(
-        instr: &Instruction,
-        defined: &mut HashSet<Variable>,
-        max_var: &mut Option<u32>,
-    ) {
+    fn register_outputs(instr: &Instruction, defined: &mut VarBitset, max_var: &mut Option<u32>) {
         for v in &instr.outputs {
             defined.insert(*v);
             *max_var = Some(max_var.map_or(v.0, |m: u32| m.max(v.0)));

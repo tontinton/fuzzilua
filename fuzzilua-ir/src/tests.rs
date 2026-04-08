@@ -150,7 +150,7 @@ fn emit_random_flat_op(rng: &mut StdRng, prog: &mut Program, available: &[Variab
         4 => {
             let v = prog.new_var();
             let s = random_string(rng);
-            prog.emit(Op::LoadString(s), vec![], vec![v]);
+            prog.emit(Op::LoadString(s.into()), vec![], vec![v]);
         }
         5 => {
             let v = prog.new_var();

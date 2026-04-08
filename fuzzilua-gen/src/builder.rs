@@ -176,7 +176,7 @@ impl ProgramBuilder {
         if let Some(v) = self.random_variable_of_type(LuaType::String, rng) {
             return Some(v);
         }
-        self.emit(Op::LoadString(random_string(rng)), vec![])
+        self.emit(Op::LoadString(random_string(rng).into()), vec![])
             .map(|v| v[0])
     }
 

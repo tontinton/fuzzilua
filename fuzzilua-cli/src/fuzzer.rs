@@ -2,9 +2,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use fuzzilua_corpus::Corpus;
+use fuzzilua_corpus::{Corpus, minimize};
 use fuzzilua_ir::lift;
-use fuzzilua_mutate::MutationEngine;
+use fuzzilua_mutate::{HybridEngine, MutationEngine};
 use fuzzilua_target::{ExecStatus, Target};
 use rand::Rng;
 use tracing::{debug, error, info, warn};
@@ -15,6 +15,8 @@ use crate::stats::Stats;
 pub struct FuzzerConfig {
     pub max_iters: Option<u64>,
     pub crash_dir: std::path::PathBuf,
+    pub minimize: bool,
+    pub generation_ratio: f64,
 }
 
 pub fn run_fuzzer_loop(
@@ -25,6 +27,7 @@ pub fn run_fuzzer_loop(
     shutdown: Arc<AtomicBool>,
     rng: &mut impl Rng,
 ) -> Stats {
+    let hybrid = HybridEngine::new();
     let mut stats = Stats::new();
     let mut iter: u64 = 0;
 
@@ -38,9 +41,15 @@ pub fn run_fuzzer_loop(
             break;
         }
 
-        let entry = corpus.select(rng);
-        let mut program = entry.program.clone();
-        engine.mutate(&mut program, rng);
+        let mut program =
+            if !corpus.is_empty() && rng.random_range(0.0..1.0) >= config.generation_ratio {
+                let entry = corpus.select(rng);
+                let mut p = entry.program.clone();
+                engine.mutate(&mut p, rng);
+                p
+            } else {
+                hybrid.generate(rng)
+            };
         let script = lift(&program);
         let program_size = program.instructions.len();
 
@@ -66,6 +75,15 @@ pub fn run_fuzzer_loop(
             ExecStatus::Ok | ExecStatus::RuntimeError(_) => {
                 let mut coverage = target.collect_coverage();
                 coverage.classify_counts();
+                if config.minimize {
+                    program = minimize(&program, target);
+                    let script = lift(&program);
+                    if target.execute(&script).is_ok() {
+                        coverage = target.collect_coverage();
+                        coverage.classify_counts();
+                    }
+                    let _ = target.reset();
+                }
                 if corpus.add(program, coverage) {
                     debug!(corpus_size = corpus.len(), "new coverage found");
                 }

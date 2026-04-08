@@ -1,5 +1,5 @@
 use crate::builder::{ProgramBuilder, random_field_name, random_string};
-use fuzzilua_ir::{BinOp, CmpOp, GcMode, Op, UnOp, Variable};
+use fuzzilua_ir::{BinOp, CmpOp, GcMode, METAMETHODS, Op, UnOp, Variable};
 use rand::Rng;
 use rand::RngCore;
 
@@ -24,7 +24,7 @@ fn gen_float(b: &mut ProgramBuilder, rng: &mut dyn RngCore) -> Option<()> {
 }
 
 fn gen_string(b: &mut ProgramBuilder, rng: &mut dyn RngCore) -> Option<()> {
-    b.emit(Op::LoadString(random_string(rng)), vec![])?;
+    b.emit(Op::LoadString(random_string(rng).into()), vec![])?;
     Some(())
 }
 
@@ -47,14 +47,14 @@ fn gen_create_table(b: &mut ProgramBuilder, _rng: &mut dyn RngCore) -> Option<()
 
 fn gen_get_property(b: &mut ProgramBuilder, rng: &mut dyn RngCore) -> Option<()> {
     let t = b.ensure_table(rng)?;
-    b.emit(Op::TableGetField(random_field_name(rng)), vec![t])?;
+    b.emit(Op::TableGetField(random_field_name(rng).into()), vec![t])?;
     Some(())
 }
 
 fn gen_set_property(b: &mut ProgramBuilder, rng: &mut dyn RngCore) -> Option<()> {
     let t = b.ensure_table(rng)?;
     let v = b.ensure_any(rng)?;
-    b.emit(Op::TableSetField(random_field_name(rng)), vec![t, v])?;
+    b.emit(Op::TableSetField(random_field_name(rng).into()), vec![t, v])?;
     Some(())
 }
 
@@ -75,14 +75,14 @@ fn gen_set_index(b: &mut ProgramBuilder, rng: &mut dyn RngCore) -> Option<()> {
 
 // -- Metamethods -------------------------------------------------------------
 
-const METAMETHODS: &[(&str, f64, u32)] = &[
-    ("__index", 5.0, 2),
-    ("__newindex", 5.0, 2),
-    ("__eq", 4.0, 2),
-    ("__concat", 4.0, 2),
-    ("__len", 4.0, 1),
-    ("__add", 5.0, 2),
-    ("__call", 5.0, 1),
+const GENERATOR_METAMETHODS: &[(&str, f64)] = &[
+    ("__index", 5.0),
+    ("__newindex", 5.0),
+    ("__eq", 4.0),
+    ("__concat", 4.0),
+    ("__len", 4.0),
+    ("__add", 5.0),
+    ("__call", 5.0),
 ];
 
 fn gen_metamethod_for(
@@ -100,22 +100,22 @@ fn gen_metamethod_for(
             b.emit(Op::Return, vec![v]);
         }
         b.end_block();
-        b.emit(Op::TableSetField(mm_name.to_string()), vec![mt_var, fn_var])?;
+        b.emit(Op::TableSetField(mm_name.into()), vec![mt_var, fn_var])?;
     }
 
     b.emit(Op::SetMetatable, vec![target, mt_var])?;
     Some(())
 }
 
-fn make_metamethod_gen(mm_name: &'static str, param_count: u32) -> GenFn {
-    match (mm_name, param_count) {
-        ("__index", 2) => |b, rng| gen_metamethod_for(b, rng, "__index", 2),
-        ("__newindex", 2) => |b, rng| gen_metamethod_for(b, rng, "__newindex", 2),
-        ("__eq", 2) => |b, rng| gen_metamethod_for(b, rng, "__eq", 2),
-        ("__concat", 2) => |b, rng| gen_metamethod_for(b, rng, "__concat", 2),
-        ("__len", 1) => |b, rng| gen_metamethod_for(b, rng, "__len", 1),
-        ("__add", 2) => |b, rng| gen_metamethod_for(b, rng, "__add", 2),
-        ("__call", 1) => |b, rng| gen_metamethod_for(b, rng, "__call", 1),
+fn make_metamethod_gen(mm_name: &'static str) -> GenFn {
+    match mm_name {
+        "__index" => |b, rng| gen_metamethod_for(b, rng, "__index", 2),
+        "__newindex" => |b, rng| gen_metamethod_for(b, rng, "__newindex", 2),
+        "__eq" => |b, rng| gen_metamethod_for(b, rng, "__eq", 2),
+        "__concat" => |b, rng| gen_metamethod_for(b, rng, "__concat", 2),
+        "__len" => |b, rng| gen_metamethod_for(b, rng, "__len", 1),
+        "__add" => |b, rng| gen_metamethod_for(b, rng, "__add", 2),
+        "__call" => |b, rng| gen_metamethod_for(b, rng, "__call", 1),
         _ => unreachable!(),
     }
 }
@@ -141,7 +141,7 @@ fn gen_alloc_pressure(b: &mut ProgramBuilder, rng: &mut dyn RngCore) -> Option<(
             let s: String = (0..rng.random_range(10..=50))
                 .map(|_| rng.random_range(b'a'..=b'z') as char)
                 .collect();
-            b.emit(Op::LoadString(s), vec![])?;
+            b.emit(Op::LoadString(s.into()), vec![])?;
         }
     }
     Some(())
@@ -253,13 +253,13 @@ fn gen_for_generic(b: &mut ProgramBuilder, rng: &mut dyn RngCore) -> Option<()> 
 
 // -- Callbacks with GC -------------------------------------------------------
 
-fn emit_loadstring_call(
+pub(crate) fn emit_loadstring_call(
     b: &mut ProgramBuilder,
     lua: &str,
     args: Vec<Variable>,
     ret_count: u32,
 ) -> Option<Vec<Variable>> {
-    let code_var = b.emit(Op::LoadString(lua.to_string()), vec![])?[0];
+    let code_var = b.emit(Op::LoadString(lua.into()), vec![])?[0];
     let loader_var = b.emit(Op::Loadstring, vec![code_var])?[0];
     let factory = b.emit_n(
         Op::CallFunction {
@@ -306,22 +306,11 @@ fn gen_metamethod_callback_with_gc(b: &mut ProgramBuilder, rng: &mut dyn RngCore
     let target = b.ensure_table(rng)?;
     let mt_var = b.emit(Op::CreateTable, vec![])?[0];
 
-    let mm_names = [
-        "__index",
-        "__newindex",
-        "__add",
-        "__eq",
-        "__len",
-        "__concat",
-        "__call",
-    ];
-    let mm = mm_names[rng.random_range(0..mm_names.len())];
-
-    let param_count = if mm == "__len" || mm == "__call" {
-        1u32
-    } else {
-        2
-    };
+    let mm = GENERATOR_METAMETHODS[rng.random_range(0..GENERATOR_METAMETHODS.len())].0;
+    let param_count = METAMETHODS
+        .iter()
+        .find(|m| m.name == mm)
+        .map_or(2, |m| m.param_count);
 
     if let Some(fn_out) = b.begin_block(Op::BeginFunction { param_count }, vec![]) {
         let fn_var = fn_out[0];
@@ -334,7 +323,7 @@ fn gen_metamethod_callback_with_gc(b: &mut ProgramBuilder, rng: &mut dyn RngCore
             b.emit(Op::Return, vec![v]);
         }
         b.end_block();
-        b.emit(Op::TableSetField(mm.to_string()), vec![mt_var, fn_var]);
+        b.emit(Op::TableSetField(mm.into()), vec![mt_var, fn_var]);
     }
 
     b.emit(Op::SetMetatable, vec![target, mt_var])?;
@@ -342,14 +331,25 @@ fn gen_metamethod_callback_with_gc(b: &mut ProgramBuilder, rng: &mut dyn RngCore
     Some(())
 }
 
-fn trigger_metamethod(b: &mut ProgramBuilder, rng: &mut dyn RngCore, target: Variable, mm: &str) {
+pub(crate) fn trigger_metamethod(
+    b: &mut ProgramBuilder,
+    rng: &mut dyn RngCore,
+    target: Variable,
+    mm: &str,
+) {
     match mm {
         "__index" => {
-            b.emit(Op::TableGetField(random_field_name(rng)), vec![target]);
+            b.emit(
+                Op::TableGetField(random_field_name(rng).into()),
+                vec![target],
+            );
         }
         "__newindex" => {
             if let Some(v) = b.ensure_any(rng) {
-                b.emit(Op::TableSetField(random_field_name(rng)), vec![target, v]);
+                b.emit(
+                    Op::TableSetField(random_field_name(rng).into()),
+                    vec![target, v],
+                );
             }
         }
         "__add" => {
@@ -403,7 +403,7 @@ fn gen_loadstring_simple(b: &mut ProgramBuilder, rng: &mut dyn RngCore) -> Optio
         "local s = string.rep('x', 100); return #s",
     ];
     let code = snippets[rng.random_range(0..snippets.len())];
-    let s_var = b.emit(Op::LoadString(code.to_string()), vec![])?[0];
+    let s_var = b.emit(Op::LoadString(code.into()), vec![])?[0];
     let f_var = b.emit(Op::Loadstring, vec![s_var])?[0];
     b.emit_n(
         Op::CallFunction {
@@ -569,11 +569,11 @@ pub fn all_generators() -> Vec<Generator> {
         },
     ];
 
-    for &(mm_name, weight, param_count) in METAMETHODS {
+    for &(mm_name, weight) in GENERATOR_METAMETHODS {
         gens.push(Generator {
             name: mm_name,
             weight,
-            generate: make_metamethod_gen(mm_name, param_count),
+            generate: make_metamethod_gen(mm_name),
         });
     }
 

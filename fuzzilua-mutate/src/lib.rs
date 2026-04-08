@@ -1,11 +1,14 @@
 mod engine;
+mod hybrid;
 mod mutators;
-mod util;
+pub mod util;
 
 pub use engine::MutationEngine;
+pub use hybrid::HybridEngine;
 pub use mutators::{
-    CodeGenMutator, CombineMutator, GcInjectionMutator, InputMutator, Mutator, OperationMutator,
-    SpliceMutator,
+    CallbackGcMutator, ChainDepthMutator, CodeGenMutator, CombineMutator, GcInjectionMutator,
+    InputMutator, InterleaveMutator, LoadstringWrapMutator, MetamethodSwapMutator, Mutator,
+    OperationMutator, SpliceMutator, TableSizeMutator,
 };
 
 #[cfg(test)]

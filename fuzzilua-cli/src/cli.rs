@@ -29,6 +29,28 @@ pub struct Cli {
 
     #[arg(long, default_value = "65536", help = "GC bitmap size")]
     pub gc_size: usize,
+
+    #[arg(long, help = "Disable minimization of new corpus entries")]
+    pub no_minimize: bool,
+
+    #[arg(
+        long,
+        default_value = "0.3",
+        value_parser = parse_ratio,
+        help = "Probability that a new program is generated from scratch vs mutated from corpus (0.0-1.0)"
+    )]
+    pub generation_ratio: f64,
+}
+
+fn parse_ratio(s: &str) -> Result<f64, String> {
+    let v: f64 = s
+        .parse()
+        .map_err(|e: std::num::ParseFloatError| e.to_string())?;
+    if (0.0..=1.0).contains(&v) {
+        Ok(v)
+    } else {
+        Err(format!("{v} is not in range 0.0..=1.0"))
+    }
 }
 
 fn parse_duration(s: &str) -> Result<Duration, String> {

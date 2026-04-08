@@ -19,9 +19,11 @@
 
 mod builder;
 mod generators;
+mod templates;
 
 pub use builder::ProgramBuilder;
 pub use generators::{Generator, all_generators};
+pub use templates::{ProgramTemplate, all_templates};
 
 use fuzzilua_ir::Program;
 use rand::Rng;
@@ -57,7 +59,7 @@ pub fn generate_program(
     builder.finish()
 }
 
-fn pick_weighted<'a>(
+pub(crate) fn pick_weighted<'a>(
     rng: &mut dyn RngCore,
     generators: &'a [Generator],
     total_weight: f64,

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -109,6 +110,83 @@ impl fmt::Display for GcMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Metamethod {
+    pub name: &'static str,
+    pub param_count: u32,
+}
+
+pub const METAMETHODS: &[Metamethod] = &[
+    Metamethod {
+        name: "__index",
+        param_count: 2,
+    },
+    Metamethod {
+        name: "__newindex",
+        param_count: 2,
+    },
+    Metamethod {
+        name: "__eq",
+        param_count: 2,
+    },
+    Metamethod {
+        name: "__concat",
+        param_count: 2,
+    },
+    Metamethod {
+        name: "__len",
+        param_count: 1,
+    },
+    Metamethod {
+        name: "__add",
+        param_count: 2,
+    },
+    Metamethod {
+        name: "__sub",
+        param_count: 2,
+    },
+    Metamethod {
+        name: "__mul",
+        param_count: 2,
+    },
+    Metamethod {
+        name: "__div",
+        param_count: 2,
+    },
+    Metamethod {
+        name: "__mod",
+        param_count: 2,
+    },
+    Metamethod {
+        name: "__pow",
+        param_count: 2,
+    },
+    Metamethod {
+        name: "__unm",
+        param_count: 1,
+    },
+    Metamethod {
+        name: "__lt",
+        param_count: 2,
+    },
+    Metamethod {
+        name: "__le",
+        param_count: 2,
+    },
+    Metamethod {
+        name: "__call",
+        param_count: 1,
+    },
+    Metamethod {
+        name: "__tostring",
+        param_count: 1,
+    },
+    Metamethod {
+        name: "__gc",
+        param_count: 1,
+    },
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BlockKind {
     If,
@@ -141,19 +219,22 @@ impl ArityCount {
     }
 }
 
+// String fields use Arc<str> so Program::clone() is near-free for string data
+// (ref-count bump instead of heap allocation per string). Cloning programs is
+// the hot path in the mutation engine's snapshot/rollback loop.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Op {
     LoadNil,
     LoadBool(bool),
     LoadInt(i64),
     LoadFloat(f64),
-    LoadString(String),
+    LoadString(Arc<str>),
 
     Reassign,
 
     CreateTable,
-    TableSetField(String),
-    TableGetField(String),
+    TableSetField(Arc<str>),
+    TableGetField(Arc<str>),
     TableSetIndex,
     TableGetIndex,
     TableSetNumericField(i64),
@@ -185,7 +266,7 @@ pub enum Op {
     TypeOf,
     ToNumber,
     ToString,
-    ToStringFmt(String),
+    ToStringFmt(Arc<str>),
     Print,
     RawGet,
     RawSet,
@@ -211,12 +292,12 @@ pub enum Op {
     StringLen,
     StringSub,
     StringFind,
-    StringFormat(String),
+    StringFormat(Arc<str>),
     StringRep,
     StringByte,
     StringChar,
-    StringGmatch(String),
-    StringGsub(String, String),
+    StringGmatch(Arc<str>),
+    StringGsub(Arc<str>, Arc<str>),
 
     Loadstring,
 
@@ -337,6 +418,40 @@ impl Op {
             _ => None,
         }
     }
+
+    /// Whether this op has side effects beyond defining its output variables.
+    /// Used by dead-variable elimination: pure ops with unused outputs can be removed.
+    pub fn is_effectful(&self) -> bool {
+        matches!(
+            self,
+            Self::TableSetField(_)
+                | Self::TableSetIndex
+                | Self::TableSetNumericField(_)
+                | Self::SetMetatable
+                | Self::Print
+                | Self::RawSet
+                | Self::SetFenv
+                | Self::CollectGarbage(_)
+                | Self::CallFunction { .. }
+                | Self::Return
+                | Self::Break
+                | Self::BeginFunction { .. }
+                | Self::EndFunction
+                | Self::BeginIf
+                | Self::BeginElse
+                | Self::EndIf
+                | Self::BeginWhile
+                | Self::EndWhile
+                | Self::BeginForIn
+                | Self::EndForIn
+                | Self::BeginForRange
+                | Self::EndForRange
+                | Self::BeginPcall
+                | Self::EndPcall
+                | Self::CoroutineResume
+                | Self::CoroutineYield
+        )
+    }
 }
 
 #[derive(Debug, Clone, Error)]
@@ -356,6 +471,14 @@ pub struct Instruction {
 }
 
 impl Instruction {
+    pub fn nop() -> Self {
+        Self {
+            op: Op::Nop,
+            inputs: vec![],
+            outputs: vec![],
+        }
+    }
+
     pub fn new(op: Op, inputs: Vec<Variable>, outputs: Vec<Variable>) -> Result<Self, ArityError> {
         let arity = op.arity();
         if !arity.inputs.accepts(inputs.len()) {

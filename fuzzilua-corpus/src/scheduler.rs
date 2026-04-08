@@ -24,26 +24,45 @@ impl CorpusScheduler for WeightedScheduler {
                 unique / (1.0 + e.mutation_count as f64)
             })
             .collect();
-
-        let total: f64 = weights.iter().sum();
-        if total == 0.0 {
-            return bounded_rand(rng, entries.len());
-        }
-
-        let threshold = (rng.next_u64() as f64 / u64::MAX as f64) * total;
-        let mut cumulative = 0.0;
-        for (i, &w) in weights.iter().enumerate() {
-            cumulative += w;
-            if cumulative >= threshold {
-                return i;
-            }
-        }
-        entries.len() - 1
+        weighted_select(&weights, rng)
     }
+}
+
+pub struct FocusedScheduler;
+
+impl CorpusScheduler for FocusedScheduler {
+    fn select(&self, entries: &[CorpusEntry], rng: &mut dyn RngCore) -> usize {
+        let weights: Vec<f64> = entries
+            .iter()
+            .map(|e| {
+                let (_, gc_bits) = e.coverage.count_bits();
+                (gc_bits as f64).max(1.0)
+            })
+            .collect();
+        weighted_select(&weights, rng)
+    }
+}
+
+fn weighted_select(weights: &[f64], rng: &mut dyn RngCore) -> usize {
+    debug_assert!(!weights.is_empty());
+    let total: f64 = weights.iter().sum();
+    if total == 0.0 {
+        return bounded_rand(rng, weights.len());
+    }
+    let threshold = (rng.next_u64() as f64 / u64::MAX as f64) * total;
+    let mut cumulative = 0.0;
+    for (i, &w) in weights.iter().enumerate() {
+        cumulative += w;
+        if cumulative >= threshold {
+            return i;
+        }
+    }
+    weights.len() - 1
 }
 
 /// Unbiased `[0, len)` via rejection sampling.
 fn bounded_rand(rng: &mut dyn RngCore, len: usize) -> usize {
+    debug_assert!(len > 0);
     let len = len as u64;
     let threshold = u64::MAX - (u64::MAX % len);
     loop {
