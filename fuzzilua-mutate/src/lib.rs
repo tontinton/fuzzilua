@@ -6,9 +6,10 @@ pub mod util;
 pub use engine::MutationEngine;
 pub use hybrid::HybridEngine;
 pub use mutators::{
-    CallbackGcMutator, ChainDepthMutator, CodeGenMutator, CombineMutator, GcInjectionMutator,
-    InputMutator, InterleaveMutator, LoadstringWrapMutator, MetamethodSwapMutator, Mutator,
-    OperationMutator, SpliceMutator, TableSizeMutator,
+    CallbackGcMutator, ChainDepthMutator, CodeGenMutator, CombineMutator, EnvironmentMutator,
+    GcInjectionMutator, InputMutator, InstructionDeleteMutator, InterleaveMutator,
+    LoadstringWrapMutator, MetamethodSwapMutator, Mutator, OperationMutator, PcallWrapMutator,
+    SpliceMutator, TableSizeMutator, TypeConfusionMutator,
 };
 
 #[cfg(test)]

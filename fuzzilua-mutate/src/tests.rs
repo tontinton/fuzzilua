@@ -7,9 +7,10 @@ use test_case::test_case;
 use crate::engine::MutationEngine;
 use crate::hybrid::HybridEngine;
 use crate::mutators::{
-    CallbackGcMutator, ChainDepthMutator, CodeGenMutator, CombineMutator, GcInjectionMutator,
-    InputMutator, InterleaveMutator, LoadstringWrapMutator, MetamethodSwapMutator, Mutator,
-    OperationMutator, SpliceMutator, TableSizeMutator,
+    CallbackGcMutator, ChainDepthMutator, CodeGenMutator, CombineMutator, EnvironmentMutator,
+    GcInjectionMutator, InputMutator, InstructionDeleteMutator, InterleaveMutator,
+    LoadstringWrapMutator, MetamethodSwapMutator, Mutator, OperationMutator, PcallWrapMutator,
+    SpliceMutator, TableSizeMutator, TypeConfusionMutator,
 };
 
 const FUZZ_SEED: u64 = 0xCAFE_1234_5678;
@@ -108,6 +109,52 @@ fn make_callback_program() -> Program {
     p
 }
 
+fn make_pcall_program() -> Program {
+    let mut p = Program::new();
+    p.emit(Op::LoadInt(1), vec![], vec![Variable(0)]);
+    p.emit(Op::BeginPcall, vec![], vec![Variable(1)]);
+    p.emit(Op::LoadInt(2), vec![], vec![Variable(2)]);
+    p.emit(
+        Op::BinaryOp(BinOp::Add),
+        vec![Variable(0), Variable(2)],
+        vec![Variable(3)],
+    );
+    p.emit(Op::EndPcall, vec![], vec![]);
+    p.emit(Op::LoadInt(3), vec![], vec![Variable(4)]);
+    p.next_var = 5;
+    p
+}
+
+fn make_multi_fn_program() -> Program {
+    let mut p = Program::new();
+    p.emit(
+        Op::BeginFunction { param_count: 0 },
+        vec![],
+        vec![Variable(0)],
+    );
+    p.emit(Op::LoadInt(1), vec![], vec![Variable(1)]);
+    p.emit(Op::Return, vec![Variable(1)], vec![]);
+    p.emit(Op::EndFunction, vec![], vec![]);
+    p.emit(
+        Op::BeginFunction { param_count: 0 },
+        vec![],
+        vec![Variable(2)],
+    );
+    p.emit(Op::LoadInt(2), vec![], vec![Variable(3)]);
+    p.emit(Op::Return, vec![Variable(3)], vec![]);
+    p.emit(Op::EndFunction, vec![], vec![]);
+    p.emit(
+        Op::CallFunction {
+            arg_count: 0,
+            ret_count: 1,
+        },
+        vec![Variable(0)],
+        vec![Variable(4)],
+    );
+    p.next_var = 5;
+    p
+}
+
 fn assert_mutator_valid(mutator: &dyn Mutator, programs: &[Program], iterations: usize) {
     let mut rng = StdRng::seed_from_u64(42);
     let mut applied = 0;
@@ -163,6 +210,19 @@ fn mutator_by_name(name: &str) -> (Box<dyn Mutator>, Vec<Program>) {
             vec![make_metamethod_program()],
         ),
         "callback_gc" => (Box::new(CallbackGcMutator), vec![make_callback_program()]),
+        "instruction_delete" => (
+            Box::new(InstructionDeleteMutator),
+            vec![make_three_var_program(), make_table_populate_program()],
+        ),
+        "type_confusion" => (
+            Box::new(TypeConfusionMutator),
+            vec![make_callback_program(), make_metamethod_program()],
+        ),
+        "pcall_wrap" => (
+            Box::new(PcallWrapMutator),
+            vec![make_three_var_program(), make_pcall_program()],
+        ),
+        "environment" => (Box::new(EnvironmentMutator), vec![make_multi_fn_program()]),
         _ => panic!("unknown mutator: {name}"),
     }
 }
@@ -179,6 +239,10 @@ fn mutator_by_name(name: &str) -> (Box<dyn Mutator>, Vec<Program>) {
 #[test_case("loadstring_wrap")]
 #[test_case("metamethod_swap")]
 #[test_case("callback_gc")]
+#[test_case("instruction_delete")]
+#[test_case("type_confusion")]
+#[test_case("pcall_wrap")]
+#[test_case("environment")]
 fn mutator_produces_valid_ir(name: &str) {
     let (mutator, programs) = mutator_by_name(name);
     assert_mutator_valid(mutator.as_ref(), &programs, 20);

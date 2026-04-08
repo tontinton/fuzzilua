@@ -2,12 +2,12 @@ use fuzzilua_gen::{ProgramBuilder, all_generators, generate_program};
 use fuzzilua_ir::{
     BinOp, CmpOp, GcMode, Instruction, LuaType, METAMETHODS, Op, Program, UnOp, VarBitset, Variable,
 };
-use rand::Rng;
-use rand::RngCore;
+use rand::{Rng, RngCore};
 use std::sync::Arc;
 
 use crate::util::{
-    find_balanced_splice_ranges, find_compatible_variables, random_insertion_point, remap_variables,
+    find_balanced_splice_ranges, find_block_end, find_compatible_variables, find_fn_blocks,
+    is_metamethod_fn, pick_random, random_insertion_point, remap_variables,
 };
 
 const CODEGEN_BUDGET: usize = 10;
@@ -581,19 +581,9 @@ fn split_into_block_aware_chunks(instrs: &[Instruction]) -> Vec<Vec<Instruction>
     let mut i = 0;
     while i < instrs.len() {
         if instrs[i].op.opens_block().is_some() {
-            let start = i;
-            let mut depth = 1i32;
-            i += 1;
-            while i < instrs.len() && depth > 0 {
-                if instrs[i].op.opens_block().is_some() {
-                    depth += 1;
-                }
-                if instrs[i].op.closes_block().is_some() {
-                    depth -= 1;
-                }
-                i += 1;
-            }
-            chunks.push(instrs[start..i].to_vec());
+            let end = find_block_end(instrs, i).unwrap_or(instrs.len());
+            chunks.push(instrs[i..end].to_vec());
+            i = end;
         } else {
             chunks.push(vec![instrs[i].clone()]);
             i += 1;
@@ -793,6 +783,468 @@ impl Mutator for CallbackGcMutator {
         };
 
         program.instructions.insert(target_idx + 1, gc_instr);
+        true
+    }
+}
+
+pub struct InstructionDeleteMutator;
+
+impl Mutator for InstructionDeleteMutator {
+    fn name(&self) -> &'static str {
+        "InstructionDeleteMutator"
+    }
+
+    fn mutate(&self, program: &mut Program, rng: &mut dyn RngCore) -> bool {
+        if program.instructions.len() < 3 {
+            return false;
+        }
+
+        for _ in 0..10 {
+            let idx = rng.random_range(0..program.instructions.len());
+            let instr = &program.instructions[idx];
+
+            if instr.op.opens_block().is_some() || instr.op.closes_block().is_some() {
+                continue;
+            }
+
+            let any_output_used = instr.outputs.iter().any(|out| {
+                program.instructions[idx + 1..]
+                    .iter()
+                    .any(|later| later.inputs.contains(out))
+            });
+            if any_output_used {
+                continue;
+            }
+
+            program.instructions.remove(idx);
+            return true;
+        }
+        false
+    }
+}
+
+pub struct TypeConfusionMutator;
+
+impl Mutator for TypeConfusionMutator {
+    fn name(&self) -> &'static str {
+        "TypeConfusionMutator"
+    }
+
+    fn mutate(&self, program: &mut Program, rng: &mut dyn RngCore) -> bool {
+        if program.instructions.len() < 2 {
+            return false;
+        }
+
+        let strategy = rng.random_range(0..3u8);
+        match strategy {
+            0 => self.reassign_wrong_type(program, rng),
+            1 => self.metamethod_wrong_return(program, rng),
+            _ => self.swap_typed_inputs(program, rng),
+        }
+    }
+}
+
+impl TypeConfusionMutator {
+    fn reassign_wrong_type(&self, program: &mut Program, rng: &mut dyn RngCore) -> bool {
+        let typed_uses: Vec<(usize, usize)> = program
+            .instructions
+            .iter()
+            .enumerate()
+            .filter(|(_, instr)| !instr.inputs.is_empty() && instr.op.is_effectful())
+            .flat_map(|(i, instr)| (0..instr.inputs.len()).map(move |slot| (i, slot)))
+            .collect();
+
+        if typed_uses.is_empty() {
+            return false;
+        }
+
+        let &(use_idx, slot) = pick_random(&typed_uses, rng);
+        let target_var = program.instructions[use_idx].inputs[slot];
+        let current_type = infer_var_type(program, target_var);
+
+        let confusion_op = pick_confusing_value(current_type, rng);
+        let new_var = program.new_var();
+
+        let load_instr = Instruction {
+            op: confusion_op,
+            inputs: vec![],
+            outputs: vec![new_var],
+        };
+        let reassign_instr = Instruction {
+            op: Op::Reassign,
+            inputs: vec![new_var],
+            outputs: vec![target_var],
+        };
+
+        let tail = program.instructions.split_off(use_idx);
+        program.instructions.push(load_instr);
+        program.instructions.push(reassign_instr);
+        program.instructions.extend(tail);
+        true
+    }
+
+    fn metamethod_wrong_return(&self, program: &mut Program, rng: &mut dyn RngCore) -> bool {
+        let mm_fns: Vec<(usize, usize)> = find_fn_blocks(program)
+            .into_iter()
+            .filter(|&(_, _, fv)| is_metamethod_fn(program, fv))
+            .map(|(start, end, _)| (start, end))
+            .collect();
+
+        if mm_fns.is_empty() {
+            return false;
+        }
+
+        let &(fn_start, fn_end) = pick_random(&mm_fns, rng);
+        let closer_idx = fn_end - 1;
+
+        let return_indices: Vec<usize> = (fn_start..closer_idx)
+            .filter(|&j| matches!(program.instructions[j].op, Op::Return))
+            .collect();
+
+        if return_indices.is_empty() {
+            let wrong_val = program.new_var();
+
+            let wrong_type = pick_confusing_value(LuaType::Table, rng);
+            let load = Instruction {
+                op: wrong_type,
+                inputs: vec![],
+                outputs: vec![wrong_val],
+            };
+            let ret = Instruction {
+                op: Op::Return,
+                inputs: vec![wrong_val],
+                outputs: vec![],
+            };
+
+            let tail = program.instructions.split_off(closer_idx);
+            program.instructions.push(load);
+            program.instructions.push(ret);
+            program.instructions.extend(tail);
+        } else {
+            let &ret_idx = pick_random(&return_indices, rng);
+            if !program.instructions[ret_idx].inputs.is_empty() {
+                let ret_var = program.instructions[ret_idx].inputs[0];
+                let current_type = infer_var_type(program, ret_var);
+                let wrong_op = pick_confusing_value(current_type, rng);
+                let new_var = program.new_var();
+                let load = Instruction {
+                    op: wrong_op,
+                    inputs: vec![],
+                    outputs: vec![new_var],
+                };
+                program.instructions.insert(ret_idx, load);
+                program.instructions[ret_idx + 1].inputs[0] = new_var;
+            }
+        }
+        true
+    }
+
+    fn swap_typed_inputs(&self, program: &mut Program, rng: &mut dyn RngCore) -> bool {
+        let multi_input: Vec<usize> = program
+            .instructions
+            .iter()
+            .enumerate()
+            .filter(|(_, instr)| instr.inputs.len() >= 2)
+            .map(|(i, _)| i)
+            .collect();
+
+        if multi_input.is_empty() {
+            return false;
+        }
+
+        let idx = *pick_random(&multi_input, rng);
+        let len = program.instructions[idx].inputs.len();
+        let a = rng.random_range(0..len);
+        let mut b = rng.random_range(0..len - 1);
+        if b >= a {
+            b += 1;
+        }
+        let type_a = infer_var_type(program, program.instructions[idx].inputs[a]);
+        let type_b = infer_var_type(program, program.instructions[idx].inputs[b]);
+        if type_a == type_b {
+            return false;
+        }
+        program.instructions[idx].inputs.swap(a, b);
+        true
+    }
+}
+
+fn pick_confusing_value(current: LuaType, rng: &mut dyn RngCore) -> Op {
+    let confused: &[Op] = match current {
+        LuaType::Table | LuaType::Function | LuaType::Coroutine => &[
+            Op::LoadInt(0),
+            Op::LoadString("".into()),
+            Op::LoadBool(false),
+            Op::LoadFloat(f64::NAN),
+            Op::LoadNil,
+        ],
+        LuaType::Integer | LuaType::Number => &[
+            Op::CreateTable,
+            Op::LoadString("not_a_number".into()),
+            Op::LoadBool(true),
+            Op::LoadNil,
+        ],
+        LuaType::String => &[
+            Op::CreateTable,
+            Op::LoadInt(0xDEAD),
+            Op::LoadBool(false),
+            Op::LoadNil,
+            Op::LoadFloat(f64::INFINITY),
+        ],
+        LuaType::Boolean => &[
+            Op::LoadInt(0),
+            Op::LoadString("".into()),
+            Op::LoadNil,
+            Op::CreateTable,
+        ],
+        _ => &[
+            Op::CreateTable,
+            Op::LoadInt(-1),
+            Op::LoadString("confused".into()),
+            Op::LoadFloat(f64::NAN),
+            Op::LoadBool(false),
+            Op::LoadNil,
+        ],
+    };
+    pick_random(confused, rng).clone()
+}
+
+pub struct PcallWrapMutator;
+
+impl Mutator for PcallWrapMutator {
+    fn name(&self) -> &'static str {
+        "PcallWrapMutator"
+    }
+
+    fn mutate(&self, program: &mut Program, rng: &mut dyn RngCore) -> bool {
+        if rng.random_bool(0.6) {
+            self.wrap_in_pcall(program, rng)
+        } else {
+            self.unwrap_pcall(program, rng)
+        }
+    }
+}
+
+impl PcallWrapMutator {
+    fn wrap_in_pcall(&self, program: &mut Program, rng: &mut dyn RngCore) -> bool {
+        let ranges = find_balanced_splice_ranges(&program.instructions);
+        let usable: Vec<_> = ranges
+            .into_iter()
+            .filter(|(s, e)| {
+                let len = e - s;
+                (1..=15).contains(&len)
+                    && !program.instructions[*s..*e]
+                        .iter()
+                        .any(|i| matches!(i.op, Op::Return | Op::Break))
+            })
+            .collect();
+
+        if usable.is_empty() {
+            return false;
+        }
+
+        let &(start, end) = pick_random(&usable, rng);
+
+        let status_var = program.new_var();
+
+        let begin = Instruction {
+            op: Op::BeginPcall,
+            inputs: vec![],
+            outputs: vec![status_var],
+        };
+        let end_instr = Instruction {
+            op: Op::EndPcall,
+            inputs: vec![],
+            outputs: vec![],
+        };
+
+        program.instructions.insert(end, end_instr);
+        program.instructions.insert(start, begin);
+        true
+    }
+
+    fn unwrap_pcall(&self, program: &mut Program, rng: &mut dyn RngCore) -> bool {
+        let pcall_begins: Vec<usize> = program
+            .instructions
+            .iter()
+            .enumerate()
+            .filter(|(_, instr)| matches!(instr.op, Op::BeginPcall))
+            .map(|(i, _)| i)
+            .collect();
+
+        if pcall_begins.is_empty() {
+            return false;
+        }
+
+        let begin_idx = *pick_random(&pcall_begins, rng);
+        let Some(end_past) = find_block_end(&program.instructions, begin_idx) else {
+            return false;
+        };
+
+        program.instructions.remove(end_past - 1);
+        program.instructions.remove(begin_idx);
+        true
+    }
+}
+
+pub struct EnvironmentMutator;
+
+impl Mutator for EnvironmentMutator {
+    fn name(&self) -> &'static str {
+        "EnvironmentMutator"
+    }
+
+    fn mutate(&self, program: &mut Program, rng: &mut dyn RngCore) -> bool {
+        let strategy = rng.random_range(0..3u8);
+        match strategy {
+            0 => self.setfenv_with_metamethods(program, rng),
+            1 => self.swap_function_env(program, rng),
+            _ => self.setfenv_raw(program, rng),
+        }
+    }
+}
+
+impl EnvironmentMutator {
+    fn setfenv_with_metamethods(&self, program: &mut Program, rng: &mut dyn RngCore) -> bool {
+        let fn_blocks = find_fn_blocks(program);
+        if fn_blocks.is_empty() {
+            return false;
+        }
+
+        let &(_, fn_end, fn_var) = pick_random(&fn_blocks, rng);
+
+        let env_table = program.new_var();
+        let mt = program.new_var();
+        let index_fn_var = program.new_var();
+        let index_self = program.new_var();
+        let index_key = program.new_var();
+        let result = program.new_var();
+        let mt_result = program.new_var();
+
+        let index_body_op: Op = if rng.random_bool(0.5) {
+            Op::LoadInt(rng.random_range(0..100))
+        } else {
+            Op::LoadString("polluted".into())
+        };
+
+        let new_instrs = vec![
+            Instruction {
+                op: Op::CreateTable,
+                inputs: vec![],
+                outputs: vec![env_table],
+            },
+            Instruction {
+                op: Op::CreateTable,
+                inputs: vec![],
+                outputs: vec![mt],
+            },
+            Instruction {
+                op: Op::BeginFunction { param_count: 2 },
+                inputs: vec![],
+                outputs: vec![index_fn_var, index_self, index_key],
+            },
+            Instruction {
+                op: index_body_op,
+                inputs: vec![],
+                outputs: vec![result],
+            },
+            Instruction {
+                op: Op::Return,
+                inputs: vec![result],
+                outputs: vec![],
+            },
+            Instruction {
+                op: Op::EndFunction,
+                inputs: vec![],
+                outputs: vec![],
+            },
+            Instruction {
+                op: Op::TableSetField("__index".into()),
+                inputs: vec![mt, index_fn_var],
+                outputs: vec![],
+            },
+            Instruction {
+                op: Op::SetMetatable,
+                inputs: vec![env_table, mt],
+                outputs: vec![mt_result],
+            },
+            Instruction {
+                op: Op::SetFenv,
+                inputs: vec![fn_var, env_table],
+                outputs: vec![],
+            },
+        ];
+
+        let tail = program.instructions.split_off(fn_end);
+        program.instructions.extend(new_instrs);
+        program.instructions.extend(tail);
+        true
+    }
+
+    fn swap_function_env(&self, program: &mut Program, rng: &mut dyn RngCore) -> bool {
+        let fn_blocks = find_fn_blocks(program);
+        if fn_blocks.len() < 2 {
+            return false;
+        }
+
+        let a = rng.random_range(0..fn_blocks.len());
+        let mut b = rng.random_range(0..fn_blocks.len() - 1);
+        if b >= a {
+            b += 1;
+        }
+
+        let env_var = program.new_var();
+
+        let get_env = Instruction {
+            op: Op::GetFenv,
+            inputs: vec![fn_blocks[a].2],
+            outputs: vec![env_var],
+        };
+        let set_env = Instruction {
+            op: Op::SetFenv,
+            inputs: vec![fn_blocks[b].2, env_var],
+            outputs: vec![],
+        };
+
+        program.instructions.push(get_env);
+        program.instructions.push(set_env);
+        true
+    }
+
+    fn setfenv_raw(&self, program: &mut Program, rng: &mut dyn RngCore) -> bool {
+        let fn_blocks = find_fn_blocks(program);
+        if fn_blocks.is_empty() {
+            return false;
+        }
+
+        let &(_, fn_end, fn_var) = pick_random(&fn_blocks, rng);
+
+        let table_candidates: Vec<Variable> =
+            find_compatible_variables(program, fn_end, Some(LuaType::Table))
+                .into_iter()
+                .map(|sv| sv.var)
+                .collect();
+
+        let env = if rng.random_bool(0.5) && !table_candidates.is_empty() {
+            table_candidates[rng.random_range(0..table_candidates.len())]
+        } else {
+            let v = program.new_var();
+            program.instructions.insert(
+                fn_end,
+                Instruction {
+                    op: Op::CreateTable,
+                    inputs: vec![],
+                    outputs: vec![v],
+                },
+            );
+            v
+        };
+
+        program.instructions.push(Instruction {
+            op: Op::SetFenv,
+            inputs: vec![fn_var, env],
+            outputs: vec![],
+        });
         true
     }
 }
