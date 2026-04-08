@@ -93,6 +93,29 @@ impl Corpus {
         self.global_coverage.count_bits()
     }
 
+    pub fn bitmap_sizes(&self) -> (usize, usize) {
+        (
+            self.global_coverage.edge_len(),
+            self.global_coverage.gc_len(),
+        )
+    }
+
+    pub fn add_blind(&mut self, program: Program) {
+        let coverage = CoverageBitmap::new(
+            self.global_coverage.edge_len(),
+            self.global_coverage.gc_len(),
+        );
+        let entry = CorpusEntry {
+            program,
+            coverage,
+            mutation_count: 0,
+        };
+        if let Err(e) = persist::save_entry(&self.dir, &entry) {
+            warn!("failed to persist blind corpus entry: {e}");
+        }
+        self.entries.push(entry);
+    }
+
     pub fn compact(&mut self) {
         let before = self.entries.len();
         let mut keep = vec![true; before];

@@ -3,6 +3,10 @@ name = "fuzzilua-cli"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "fuzzilua"
+path = "src/main.rs"
+
 [dependencies]
 fuzzilua-ir = { workspace = true }
 fuzzilua-gen = { workspace = true }
@@ -15,3 +19,12 @@ clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 color-eyre = { workspace = true }
+rand = { workspace = true }
+nix = { workspace = true }
+thiserror = { workspace = true }
+bincode = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+test-case = { workspace = true }
+tempfile = "3"
