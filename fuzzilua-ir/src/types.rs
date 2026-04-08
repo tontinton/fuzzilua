@@ -301,6 +301,10 @@ pub enum Op {
 
     Loadstring,
 
+    Error,
+    TableInsert,
+    TableRemove,
+
     Nop,
 }
 
@@ -389,6 +393,10 @@ impl Op {
 
             Self::Loadstring => (Exact(1), Exact(1)),
 
+            Self::Error => (Exact(1), Exact(0)),
+            Self::TableInsert => (AtLeast(2), Exact(0)),
+            Self::TableRemove => (AtLeast(1), Exact(1)),
+
             Self::Nop => (Exact(0), Exact(0)),
         };
         Arity { inputs, outputs }
@@ -450,6 +458,9 @@ impl Op {
                 | Self::EndPcall
                 | Self::CoroutineResume
                 | Self::CoroutineYield
+                | Self::Error
+                | Self::TableInsert
+                | Self::TableRemove
         )
     }
 }

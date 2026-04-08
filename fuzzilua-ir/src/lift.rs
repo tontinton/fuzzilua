@@ -609,6 +609,37 @@ fn lift_instruction(
                 format_args!("loadstring({})", inp[0]),
             );
         }
+        Op::Error => {
+            indent(out, *depth);
+            writeln!(out, "error({})", inp[0]).unwrap();
+        }
+        Op::TableInsert => {
+            indent(out, *depth);
+            if inp.len() >= 3 {
+                writeln!(out, "table.insert({}, {}, {})", inp[0], inp[1], inp[2]).unwrap();
+            } else {
+                writeln!(out, "table.insert({}, {})", inp[0], inp[1]).unwrap();
+            }
+        }
+        Op::TableRemove => {
+            if inp.len() >= 2 {
+                emit_assign(
+                    out,
+                    *depth,
+                    outp[0],
+                    declared,
+                    format_args!("table.remove({}, {})", inp[0], inp[1]),
+                );
+            } else {
+                emit_assign(
+                    out,
+                    *depth,
+                    outp[0],
+                    declared,
+                    format_args!("table.remove({})", inp[0]),
+                );
+            }
+        }
         Op::Nop => {}
     }
 }

@@ -111,13 +111,6 @@ fn run_generator_by_name(name: &str) -> (fuzzilua_ir::Program, String) {
 #[test_case("create_table")]
 #[test_case("get_property")]
 #[test_case("set_property")]
-#[test_case("__index")]
-#[test_case("__newindex")]
-#[test_case("__eq")]
-#[test_case("__concat")]
-#[test_case("__len")]
-#[test_case("__add")]
-#[test_case("__call")]
 #[test_case("gc_collect")]
 #[test_case("gc_step")]
 #[test_case("begin_function")]
@@ -130,9 +123,29 @@ fn run_generator_by_name(name: &str) -> (fuzzilua_ir::Program, String) {
 #[test_case("gsub_callback")]
 #[test_case("metamethod_gc")]
 #[test_case("coroutine")]
-#[test_case("loadstring")]
 #[test_case("upvalue")]
 #[test_case("alloc_pressure")]
+#[test_case("error_throw")]
+#[test_case("pcall_wrap")]
+#[test_case("property_remove")]
+#[test_case("reassign")]
+#[test_case("metatable_swap")]
+#[test_case("table_resize")]
+#[test_case("weak_table")]
+#[test_case("stdlib_overwrite")]
+#[test_case("coroutine_gc_interleave")]
+#[test_case("method_call_via_table")]
+#[test_case("compare_with_branch")]
+#[test_case("custom_iterator")]
+#[test_case("metatable_hierarchy")]
+#[test_case("table_populate")]
+#[test_case("mutation_during_iteration")]
+#[test_case("xpcall_handler")]
+#[test_case("string_format_tostring")]
+#[test_case("table_concat_tostring")]
+#[test_case("deep_index_coroutine")]
+#[test_case("error_tostring_gc")]
+#[test_case("unpack_large_range")]
 fn generator_produces_valid_ir(name: &str) {
     run_generator_by_name(name);
 }
@@ -168,7 +181,7 @@ fn fuzz_generate_program() {
         let mut depth = 0usize;
         let mut max_observed = 0usize;
         for instr in &prog.instructions {
-            if instr.op.opens_block().is_some() {
+            if instr.op.opens_block().is_some() && !matches!(instr.op, Op::BeginElse) {
                 depth += 1;
                 max_observed = max_observed.max(depth);
             }
