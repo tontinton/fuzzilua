@@ -26,16 +26,16 @@ Fuzzilli-inspired Rust fuzzer for GC lifecycle bugs (UaF, heap-buffer-overflow, 
 
 ## Architecture
 
-Rust workspace. Sync, thread-per-worker, no async.
+Rust workspace. Sync, thread-per-worker, no async. In `./`:
 
 ```
 cli (entry point, fuzzer loop, multi-worker)
-├── gen (weighted code generators + program templates)
-├── mutate (Input/Operation/Splice/CodeGen + GcInjection/MetamethodSwap/ChainDepth/TableSize/Interleave/LoadstringWrap/CallbackGc)
-├── corpus (storage, scheduling: Uniform/Weighted/Focused, minimization)
-├── target-redis (process mgmt, RESP client, shared-mem coverage, sandbox config)
-├── target (Target trait, Execution, ExecStatus, CrashInfo, SandboxConfig)
-├── ir (Op, Instruction, Program, Variable, LuaType, Lua lifter)
-├── coverage (edge bitmap + GC-phase-aware bitmap: alloc_site x gc_phase x gc_debt)
-└── patches/ (C patches: GC-stress allocator, edge coverage instrumentation)
+gen (weighted code generators + program templates)
+mutate (Input/Operation/Splice/CodeGen + GcInjection/MetamethodSwap/ChainDepth/TableSize/Interleave/LoadstringWrap/CallbackGc)
+corpus (storage, scheduling: Uniform/Weighted/Focused, minimization)
+target-redis (process mgmt, RESP client, shared-mem coverage, sandbox config)
+target (Target trait, Execution, ExecStatus, CrashInfo, SandboxConfig)
+ir (Op, Instruction, Program, Variable, LuaType, Lua lifter)
+coverage (edge bitmap + GC-phase-aware bitmap: alloc_site x gc_phase x gc_debt)
+patches/ (C patches: GC-stress allocator, edge coverage instrumentation)
 ```
