@@ -1,15 +1,13 @@
 //! Edge + GC-phase-aware coverage tracking.
 //!
-//! All bitmap types share a single contiguous buffer layout: edge bytes first,
-//! then GC bytes (same layout in `CoverageBitmap`, `AtomicBitmap`, `SharedCoverage`).
+//! All bitmap types share a contiguous buffer layout: edge bytes first, then GC
+//! bytes. Slice algorithms (`has_new_bits_slice`, `merge_slice`, `count_nonzero`,
+//! `classify_slice`) live as free fns in bitmap.rs; atomic variants in atomic.rs.
+//! All cross-type operations `assert_eq!` on lengths rather than silently
+//! truncating, since a size mismatch is always a bug.
 //!
-//! Slice algorithms (`has_new_bits`, `merge`, `count_nonzero`, `classify`) live as
-//! free fns in bitmap.rs and are reused by atomic.rs. All cross-type operations
-//! `assert_eq!` on lengths, never silently truncate with `.min()`, because a size
-//! mismatch is always a programming bug.
-//!
-//! `SharedCoverage` uses ONE shm region (edge+gc contiguous): one name, one mmap,
-//! one Drop. Its `open()` validates the mapped size matches expected size.
+//! `SharedCoverage` maps one shm region (edge+gc contiguous). `open()` validates
+//! the mapped size matches the expected size.
 
 mod atomic;
 mod bitmap;

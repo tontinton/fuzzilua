@@ -1,8 +1,7 @@
 use crate::types::Variable;
 
-/// Bitset indexed by `Variable.0`, replacing `HashSet<Variable>` in validate,
-/// lift, and mutators. Eliminates SipHash + hashbrown overhead that was ~20%
-/// of the perf profile. O(1) insert/contains, no allocator churn.
+/// Bitset indexed by `Variable.0`. O(1) insert/contains, used by validate,
+/// lift, and mutators instead of `HashSet<Variable>`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VarBitset {
     bits: Vec<u64>,

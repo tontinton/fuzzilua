@@ -1,13 +1,10 @@
 //! Target trait and execution types for fuzzer backends.
 //!
-//! `ExecStatus` vs `TargetError`: semantic results (crash, timeout, runtime error)
-//! live in `ExecStatus`. Infrastructure failures (spawn, connection, protocol)
-//! live in `TargetError`. A timeout is not an error, it is a normal execution outcome.
+//! `ExecStatus` holds semantic outcomes (crash, timeout, runtime error).
+//! `TargetError` holds infrastructure failures (spawn, connection, protocol).
+//! A timeout is a normal execution outcome, not an error.
 //!
-//! The `Target` trait is object-safe (no generics), sync only.
-//!
-//! `Execution` has no `stdout` field. The fuzzer never needs human-readable
-//! RESP formatting, so we skip the per-execution allocation.
+//! The `Target` trait is object-safe and sync-only.
 
 mod mock;
 
@@ -54,7 +51,6 @@ pub struct SandboxConfig {
 
 impl SandboxConfig {
     /// Redis Lua 5.1 sandbox as documented in redis/src/scripting.c.
-    /// Single source of truth: used by RedisTarget and MockTarget.
     pub fn redis_lua51(exec_timeout: Duration) -> Self {
         Self {
             available_globals: vec![

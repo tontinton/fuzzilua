@@ -419,8 +419,8 @@ impl Op {
         }
     }
 
-    /// Whether this op has side effects beyond defining its output variables.
-    /// Used by dead-variable elimination: pure ops with unused outputs can be removed.
+    /// Whether this op has side effects beyond defining its outputs.
+    /// Used by dead-variable elimination in minimize.
     pub fn is_effectful(&self) -> bool {
         matches!(
             self,

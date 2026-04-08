@@ -173,8 +173,7 @@ impl RedisTarget {
         (find_asan_report(&lines), find_ubsan_report(&lines))
     }
 
-    /// Reap the child if not already reaped, storing its ExitStatus.
-    /// Returns true if the child is still running.
+    /// Reap the child if not already reaped. Returns true if still running.
     fn poll_child(&mut self) -> bool {
         if self.exit_status.is_some() {
             return false;
@@ -192,8 +191,7 @@ impl RedisTarget {
         }
     }
 
-    /// After a failed send/recv, drain stderr and determine the outcome.
-    /// Single source of truth for crash vs connection-lost classification.
+    /// After a failed send/recv, drain stderr and classify as crash vs connection-lost.
     fn classify_failure(&mut self, script: &str, duration: Duration) -> Execution {
         let stderr = self.drain_stderr();
         let alive = self.poll_child();
