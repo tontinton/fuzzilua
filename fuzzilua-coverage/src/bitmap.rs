@@ -1,4 +1,6 @@
-use serde::{Deserialize, Serialize};
+use serde::de::{self, SeqAccess, Visitor};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// AFL-style hit count bucketization: maps raw byte counts to power-of-2 buckets.
 /// Applied after each execution to normalize coverage before comparison.
@@ -71,10 +73,116 @@ fn is_subset_slice(sub: &[u8], sup: &[u8]) -> bool {
     sub.iter().zip(sup.iter()).all(|(&s, &g)| s & !g == 0)
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct CoverageBitmap {
     buf: Vec<u8>,
     edge_len: usize,
+}
+
+impl Serialize for CoverageBitmap {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let sparse: Vec<(u32, u8)> = self
+            .buf
+            .iter()
+            .enumerate()
+            .filter(|&(_, v)| *v != 0)
+            .map(|(i, &v)| (i as u32, v))
+            .collect();
+        let mut s = serializer.serialize_struct("CoverageBitmap", 3)?;
+        s.serialize_field("edge_len", &self.edge_len)?;
+        s.serialize_field("total_len", &self.buf.len())?;
+        s.serialize_field("sparse", &sparse)?;
+        s.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for CoverageBitmap {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct BitmapVisitor;
+
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "snake_case")]
+        enum Field {
+            EdgeLen,
+            TotalLen,
+            Sparse,
+            #[serde(other)]
+            Buf,
+        }
+
+        impl<'de> Visitor<'de> for BitmapVisitor {
+            type Value = CoverageBitmap;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("CoverageBitmap")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let edge_len: usize = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(0, &self))?;
+                let total_len: usize = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(1, &self))?;
+                if total_len > 16 * 1024 * 1024 {
+                    return Err(de::Error::custom("total_len too large"));
+                }
+                if edge_len > total_len {
+                    return Err(de::Error::custom("edge_len > total_len"));
+                }
+                let sparse: Vec<(u32, u8)> = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(2, &self))?;
+                let mut buf = vec![0u8; total_len];
+                for (idx, val) in sparse {
+                    if (idx as usize) < total_len {
+                        buf[idx as usize] = val;
+                    }
+                }
+                Ok(CoverageBitmap { buf, edge_len })
+            }
+
+            fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut edge_len: Option<usize> = None;
+                let mut total_len: Option<usize> = None;
+                let mut sparse: Option<Vec<(u32, u8)>> = None;
+                let mut legacy_buf: Option<Vec<u8>> = None;
+
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        Field::EdgeLen => edge_len = Some(map.next_value()?),
+                        Field::TotalLen => total_len = Some(map.next_value()?),
+                        Field::Sparse => sparse = Some(map.next_value()?),
+                        Field::Buf => legacy_buf = Some(map.next_value()?),
+                    }
+                }
+
+                let edge_len = edge_len.ok_or_else(|| de::Error::missing_field("edge_len"))?;
+
+                if let Some(sparse) = sparse {
+                    let total_len =
+                        total_len.ok_or_else(|| de::Error::missing_field("total_len"))?;
+                    let mut buf = vec![0u8; total_len];
+                    for (idx, val) in sparse {
+                        if (idx as usize) < total_len {
+                            buf[idx as usize] = val;
+                        }
+                    }
+                    Ok(CoverageBitmap { buf, edge_len })
+                } else if let Some(buf) = legacy_buf {
+                    Ok(CoverageBitmap { buf, edge_len })
+                } else {
+                    Err(de::Error::missing_field("sparse"))
+                }
+            }
+        }
+
+        deserializer.deserialize_struct(
+            "CoverageBitmap",
+            &["edge_len", "total_len", "sparse"],
+            BitmapVisitor,
+        )
+    }
 }
 
 impl CoverageBitmap {

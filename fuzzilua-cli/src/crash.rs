@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use fuzzilua_ir::Program;
 use fuzzilua_target::CrashInfo;
 
+const MAX_REPORT_LEN: usize = 8192;
+
 pub fn build_crash_report(crash_info: &CrashInfo) -> String {
     let mut parts = Vec::new();
     if let Some(ref asan) = crash_info.asan_report {
@@ -14,10 +16,19 @@ pub fn build_crash_report(crash_info: &CrashInfo) -> String {
     if let Some(sig) = crash_info.signal {
         parts.push(format!("Signal: {sig}"));
     }
-    if parts.is_empty() {
+    let report = if parts.is_empty() {
         "Unknown crash".into()
     } else {
         parts.join("\n\n")
+    };
+    if report.len() > MAX_REPORT_LEN {
+        let truncated = &report[..report.floor_char_boundary(MAX_REPORT_LEN)];
+        format!(
+            "{truncated}\n\n... truncated ({} bytes total)",
+            report.len()
+        )
+    } else {
+        report
     }
 }
 

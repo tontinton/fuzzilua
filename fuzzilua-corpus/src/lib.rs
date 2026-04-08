@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use tracing::{debug, info, warn};
 
 const COMPACT_INTERVAL: u32 = 100;
+const MAX_CORPUS_ENTRIES: usize = 10_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CorpusEntry {
@@ -68,7 +69,9 @@ impl Corpus {
         self.entries.push(entry);
 
         self.additions_since_compact += 1;
-        if self.additions_since_compact >= COMPACT_INTERVAL {
+        if self.additions_since_compact >= COMPACT_INTERVAL
+            || self.entries.len() > MAX_CORPUS_ENTRIES
+        {
             self.compact();
             self.additions_since_compact = 0;
         }
@@ -119,12 +122,13 @@ impl Corpus {
         }
         self.entries.push(entry);
         self.additions_since_compact += 1;
-        if self.additions_since_compact >= COMPACT_INTERVAL {
+        if self.additions_since_compact >= COMPACT_INTERVAL
+            || self.entries.len() > MAX_CORPUS_ENTRIES
+        {
             self.compact();
             self.additions_since_compact = 0;
         }
     }
-
     pub fn add_blind(&mut self, program: Program) {
         let coverage = CoverageBitmap::new(
             self.global_coverage.edge_len(),
