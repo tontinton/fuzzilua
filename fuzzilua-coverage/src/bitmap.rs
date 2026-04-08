@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 /// AFL-style hit count bucketization: maps raw byte counts to power-of-2 buckets.
 /// Applied after each execution to normalize coverage before comparison.
 const BUCKET_MAP: [u8; 256] = {
@@ -64,6 +66,12 @@ fn classify_slice(data: &mut [u8]) {
     }
 }
 
+fn is_subset_slice(sub: &[u8], sup: &[u8]) -> bool {
+    assert_eq!(sub.len(), sup.len(), "bitmap size mismatch in is_subset");
+    sub.iter().zip(sup.iter()).all(|(&s, &g)| s & !g == 0)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CoverageBitmap {
     buf: Vec<u8>,
     edge_len: usize,
@@ -148,6 +156,19 @@ impl CoverageBitmap {
             return 0.0;
         }
         count_nonzero(&self.buf) as f64 / self.buf.len() as f64
+    }
+
+    pub fn is_subset_of(&self, other: &CoverageBitmap) -> bool {
+        is_subset_slice(self.edge_bytes(), other.edge_bytes())
+            && is_subset_slice(self.gc_bytes(), other.gc_bytes())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buf.iter().all(|&b| b == 0)
+    }
+
+    pub fn total_nonzero(&self) -> u32 {
+        count_nonzero(&self.buf)
     }
 }
 

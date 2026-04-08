@@ -1,0 +1,55 @@
+use crate::CorpusEntry;
+use rand::RngCore;
+
+pub trait CorpusScheduler: Send + Sync {
+    fn select(&self, entries: &[CorpusEntry], rng: &mut dyn RngCore) -> usize;
+}
+
+pub struct UniformScheduler;
+
+impl CorpusScheduler for UniformScheduler {
+    fn select(&self, entries: &[CorpusEntry], rng: &mut dyn RngCore) -> usize {
+        bounded_rand(rng, entries.len())
+    }
+}
+
+pub struct WeightedScheduler;
+
+impl CorpusScheduler for WeightedScheduler {
+    fn select(&self, entries: &[CorpusEntry], rng: &mut dyn RngCore) -> usize {
+        let weights: Vec<f64> = entries
+            .iter()
+            .map(|e| {
+                let unique = e.coverage.total_nonzero() as f64;
+                unique / (1.0 + e.mutation_count as f64)
+            })
+            .collect();
+
+        let total: f64 = weights.iter().sum();
+        if total == 0.0 {
+            return bounded_rand(rng, entries.len());
+        }
+
+        let threshold = (rng.next_u64() as f64 / u64::MAX as f64) * total;
+        let mut cumulative = 0.0;
+        for (i, &w) in weights.iter().enumerate() {
+            cumulative += w;
+            if cumulative >= threshold {
+                return i;
+            }
+        }
+        entries.len() - 1
+    }
+}
+
+/// Unbiased `[0, len)` via rejection sampling.
+fn bounded_rand(rng: &mut dyn RngCore, len: usize) -> usize {
+    let len = len as u64;
+    let threshold = u64::MAX - (u64::MAX % len);
+    loop {
+        let r = rng.next_u64();
+        if r < threshold {
+            return (r % len) as usize;
+        }
+    }
+}

@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 memmap2 = { workspace = true }
 nix = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 test-case = { workspace = true }

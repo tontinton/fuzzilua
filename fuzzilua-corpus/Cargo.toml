@@ -9,3 +9,9 @@ fuzzilua-coverage = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
 bincode = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+test-case = { workspace = true }
+tempfile = "3"
