@@ -6,7 +6,9 @@ use fuzzilua_target::{ExecStatus, Target};
 use fuzzilua_target_redis::{RedisConfig, RedisTarget};
 
 fn spawn_redis() -> Option<RedisTarget> {
-    let binary = env::var("FUZZILUA_REDIS_BIN").ok().map(PathBuf::from)?;
+    let binary = env::var(fuzzilua_target_redis::ENV_REDIS_BIN)
+        .ok()
+        .map(PathBuf::from)?;
     let config = RedisConfig {
         binary,
         exec_timeout: Duration::from_secs(2),

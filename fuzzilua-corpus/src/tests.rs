@@ -467,3 +467,19 @@ fn minimize_already_minimal_program() {
     let result = minimize(&p, &mut target);
     assert_eq!(result.instructions.len(), p.instructions.len());
 }
+
+#[test]
+fn add_unchecked_bypasses_novelty_gate_and_merges_coverage() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut corpus = make_corpus_in(dir.path());
+
+    let cov = make_coverage(&[0, 1, 2], &[]);
+    corpus.add_unchecked(Program::new(), cov.clone());
+    assert_eq!(corpus.len(), 1);
+
+    corpus.add_unchecked(Program::new(), cov);
+    assert_eq!(corpus.len(), 2, "add_unchecked should not gate on novelty");
+
+    let (edge_bits, _gc_bits) = corpus.total_coverage();
+    assert!(edge_bits >= 3, "global coverage should include merged bits");
+}

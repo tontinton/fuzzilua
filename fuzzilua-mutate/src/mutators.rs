@@ -14,7 +14,7 @@ const CODEGEN_BUDGET: usize = 10;
 const CODEGEN_MAX_DEPTH: usize = 2;
 const TYPE_AWARE_PROBABILITY: f64 = 0.75;
 
-pub trait Mutator {
+pub trait Mutator: Send + Sync {
     fn name(&self) -> &'static str;
     fn mutate(&self, program: &mut Program, rng: &mut dyn RngCore) -> bool;
 }

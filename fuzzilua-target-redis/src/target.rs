@@ -11,6 +11,7 @@ use fuzzilua_target::{CrashInfo, ExecStatus, Execution, SandboxConfig, Target, T
 use tracing::{debug, info, warn};
 
 use crate::resp::{RespClient, RespValue};
+use crate::{ENV_SHM_EDGE, ENV_SHM_GC};
 
 const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_CONSECUTIVE_TIMEOUT_THRESHOLD: u32 = 3;
@@ -26,6 +27,7 @@ pub struct RedisConfig {
     pub bind: String,
     pub port: u16,
     pub extra_args: Vec<String>,
+    pub extra_env: Vec<(String, String)>,
     pub exec_timeout: Duration,
     pub consecutive_timeout_threshold: u32,
     pub edge_bitmap_size: usize,
@@ -39,6 +41,7 @@ impl Default for RedisConfig {
             bind: "127.0.0.1".into(),
             port: 0,
             extra_args: vec![],
+            extra_env: vec![],
             exec_timeout: DEFAULT_EXEC_TIMEOUT,
             consecutive_timeout_threshold: DEFAULT_CONSECUTIVE_TIMEOUT_THRESHOLD,
             edge_bitmap_size: DEFAULT_BITMAP_SIZE,
@@ -110,8 +113,12 @@ impl RedisTarget {
             cmd.arg(arg);
         }
 
-        cmd.env("FUZZILUA_SHM_EDGE", &self.shm_name);
-        cmd.env("FUZZILUA_SHM_GC", &self.shm_name);
+        cmd.env(ENV_SHM_EDGE, &self.shm_name);
+        cmd.env(ENV_SHM_GC, &self.shm_name);
+
+        for (key, val) in &self.config.extra_env {
+            cmd.env(key, val);
+        }
 
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())

@@ -4,4 +4,6 @@ pub mod reproduce;
 pub mod seed;
 pub mod stats;
 
-pub use fuzzer::{FuzzerConfig, run_fuzzer_loop};
+pub use crash::CrashDb;
+pub use fuzzer::{SharedState, WorkerConfig, run_worker_loop};
+pub use stats::{AtomicStats, StatsReporter};

@@ -9,7 +9,7 @@ pub struct Cli {
     #[arg(long, help = "Path to redis-server binary")]
     pub redis_bin: Option<PathBuf>,
 
-    #[arg(long, default_value = "1", help = "Number of fuzzer workers")]
+    #[arg(long, default_value_t = default_jobs(), help = "Number of fuzzer workers (default: available parallelism)")]
     pub jobs: u32,
 
     #[arg(long, default_value = "corpus", help = "Corpus directory")]
@@ -23,6 +23,9 @@ pub struct Cli {
 
     #[arg(long, help = "Reproduce a crash from .lua or .bin file")]
     pub reproduce: Option<PathBuf>,
+
+    #[arg(long, help = "Minimize a crash reproducer (.bin file)")]
+    pub minimize_crash: Option<PathBuf>,
 
     #[arg(long, default_value = "65536", help = "Edge bitmap size")]
     pub edge_size: usize,
@@ -40,6 +43,28 @@ pub struct Cli {
         help = "Probability that a new program is generated from scratch vs mutated from corpus (0.0-1.0)"
     )]
     pub generation_ratio: f64,
+
+    #[arg(long, help = "Append JSON stats per interval to this file")]
+    pub stats_json: Option<PathBuf>,
+
+    #[arg(long, default_value = "5s", value_parser = parse_duration, help = "Stats display interval")]
+    pub stats_interval: Duration,
+
+    #[arg(long, help = "Enable verbose per-execution logging")]
+    pub verbose: bool,
+
+    #[arg(
+        long,
+        value_parser = parse_ratio,
+        help = "Probability of allocation failure injection (0.0-1.0)"
+    )]
+    pub alloc_fail_prob: Option<f64>,
+}
+
+fn default_jobs() -> u32 {
+    std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(1)
 }
 
 fn parse_ratio(s: &str) -> Result<f64, String> {

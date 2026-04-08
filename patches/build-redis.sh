@@ -12,13 +12,19 @@ CC="${CC:-clang}"
 # Single source of truth for bitmap size. Must match DEFAULT_BITMAP_SIZE in fuzzilua-coverage.
 BITMAP_SIZE="${BITMAP_SIZE:-65536}"
 
+ENABLE_ALLOC_FAIL="${ENABLE_ALLOC_FAIL:-1}"
+
 CFLAGS="${CFLAGS:--fsanitize=address,undefined -fsanitize-coverage=trace-pc-guard -DFUZZILUA_GC_STRESS -DFUZZILUA_GC_STRESS_INTERVAL=1 -DFUZZILUA_GC_STRESS_MODE=1 -DFUZZILUA_BITMAP_SIZE=${BITMAP_SIZE} -g -O1 -fno-omit-frame-pointer}"
+if [ "$ENABLE_ALLOC_FAIL" = "1" ]; then
+    CFLAGS="$CFLAGS -DFUZZILUA_ALLOC_FAIL"
+fi
 LDFLAGS="${LDFLAGS:--fsanitize=address,undefined -lrt}"
 
 echo "=== fuzzilua: building instrumented Redis ==="
 echo "  Redis version: $REDIS_VERSION"
 echo "  CC: $CC"
 echo "  BITMAP_SIZE: $BITMAP_SIZE"
+echo "  ENABLE_ALLOC_FAIL: $ENABLE_ALLOC_FAIL"
 echo "  CFLAGS: $CFLAGS"
 echo "  Build dir: $BUILD_DIR"
 echo "  Install dir: $INSTALL_DIR"
@@ -36,6 +42,11 @@ cd "$BUILD_DIR/redis"
 echo "--- Applying GC stress patch ---"
 git checkout -- . 2>/dev/null || true
 patch -p1 < "$SCRIPT_DIR/redis-lua51-gc-stress.patch"
+
+if [ "$ENABLE_ALLOC_FAIL" = "1" ]; then
+    echo "--- Applying alloc-fail injection patch ---"
+    patch -p1 < "$SCRIPT_DIR/redis-lua51-alloc-fail.patch"
+fi
 
 echo "--- Adding edge coverage instrumentation ---"
 cp "$SCRIPT_DIR/fuzzilua_coverage.c" src/fuzzilua_coverage.c

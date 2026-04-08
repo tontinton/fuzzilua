@@ -102,6 +102,29 @@ impl Corpus {
         )
     }
 
+    /// Add an entry whose coverage has already been validated externally
+    /// (e.g. by `AtomicBitmap::has_new_bits`). Merges coverage into the
+    /// internal global bitmap and persists, but skips the internal
+    /// `has_new_bits` gate. Use this from multi-worker paths where the
+    /// atomic bitmap is the single source of truth for novelty.
+    pub fn add_unchecked(&mut self, program: Program, coverage: CoverageBitmap) {
+        coverage.merge_into(&mut self.global_coverage);
+        let entry = CorpusEntry {
+            program,
+            coverage,
+            mutation_count: 0,
+        };
+        if let Err(e) = persist::save_entry(&self.dir, &entry) {
+            warn!("failed to persist corpus entry: {e}");
+        }
+        self.entries.push(entry);
+        self.additions_since_compact += 1;
+        if self.additions_since_compact >= COMPACT_INTERVAL {
+            self.compact();
+            self.additions_since_compact = 0;
+        }
+    }
+
     pub fn add_blind(&mut self, program: Program) {
         let coverage = CoverageBitmap::new(
             self.global_coverage.edge_len(),

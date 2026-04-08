@@ -33,6 +33,15 @@ impl AtomicBitmap {
         merge_atomic(local.gc_bytes(), self.gc_atoms());
     }
 
+    /// Atomically check for new bits and merge if found. Returns true if
+    /// any new coverage was discovered. This avoids the TOCTOU race of
+    /// separate `has_new_bits` + `merge` calls.
+    pub fn merge_if_new(&self, local: &CoverageBitmap) -> bool {
+        let new_edge = merge_if_new_atomic(local.edge_bytes(), self.edge_atoms());
+        let new_gc = merge_if_new_atomic(local.gc_bytes(), self.gc_atoms());
+        new_edge || new_gc
+    }
+
     pub fn snapshot(&self) -> CoverageBitmap {
         let bytes: Vec<u8> = self.buf.iter().map(|a| a.load(Ordering::Relaxed)).collect();
         CoverageBitmap::from_raw(bytes, self.edge_len)
@@ -60,6 +69,27 @@ fn merge_atomic(src: &[u8], dst: &[AtomicU8]) {
             d.fetch_or(*s, Ordering::Relaxed);
         }
     }
+}
+
+/// Merge src into dst, returning true if any genuinely new bits were set.
+/// Each byte is merged with fetch_or; we detect novelty by comparing the
+/// old value.
+fn merge_if_new_atomic(src: &[u8], dst: &[AtomicU8]) -> bool {
+    assert_eq!(
+        src.len(),
+        dst.len(),
+        "bitmap size mismatch in merge_if_new_atomic"
+    );
+    let mut found_new = false;
+    for (s, d) in src.iter().zip(dst.iter()) {
+        if *s != 0 {
+            let old = d.fetch_or(*s, Ordering::Relaxed);
+            if *s & !old != 0 {
+                found_new = true;
+            }
+        }
+    }
+    found_new
 }
 
 #[cfg(test)]
@@ -155,6 +185,42 @@ mod tests {
         subset.edge_bytes_mut()[3] = 0x03;
         atomic.merge(&local);
         assert!(!atomic.has_new_bits(&subset));
+    }
+
+    #[test]
+    fn merge_if_new_novelty_detection() {
+        let atomic = AtomicBitmap::new(16, 16);
+
+        let mut local = CoverageBitmap::new(16, 16);
+        local.edge_bytes_mut()[0] = 0x03;
+        assert!(atomic.merge_if_new(&local), "novel bits should return true");
+        assert_eq!(atomic.snapshot().edge_bytes()[0], 0x03);
+
+        let mut subset = CoverageBitmap::new(16, 16);
+        subset.edge_bytes_mut()[0] = 0x01;
+        assert!(!atomic.merge_if_new(&subset), "subset should return false");
+    }
+
+    #[test]
+    fn merge_if_new_concurrent_no_lost_bits() {
+        let atomic = Arc::new(AtomicBitmap::new(64, 0));
+        let handles: Vec<_> = (0..8)
+            .map(|t| {
+                let a = Arc::clone(&atomic);
+                thread::spawn(move || {
+                    let mut local = CoverageBitmap::new(64, 0);
+                    local.edge_bytes_mut()[t] = 0xFF;
+                    a.merge_if_new(&local);
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let snap = atomic.snapshot();
+        for i in 0..8 {
+            assert_eq!(snap.edge_bytes()[i], 0xFF, "byte {i} should be set");
+        }
     }
 
     #[test]
