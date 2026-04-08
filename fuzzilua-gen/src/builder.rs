@@ -28,6 +28,23 @@ impl ProgramBuilder {
         Self::new(DEFAULT_BUDGET, DEFAULT_MAX_DEPTH)
     }
 
+    pub fn with_scope(
+        budget: usize,
+        max_depth: usize,
+        next_var: u32,
+        visible: Vec<(Variable, LuaType)>,
+    ) -> Self {
+        let mut program = Program::new();
+        program.next_var = next_var;
+        Self {
+            program,
+            scope_stack: vec![visible],
+            block_kinds: Vec::new(),
+            budget,
+            max_depth,
+        }
+    }
+
     pub fn remaining_budget(&self) -> usize {
         let reserved = self.block_kinds.len();
         self.budget

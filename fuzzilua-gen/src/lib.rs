@@ -25,11 +25,12 @@ pub use generators::{Generator, all_generators};
 
 use fuzzilua_ir::Program;
 use rand::Rng;
+use rand::RngCore;
 
 const MAX_RETRIES: usize = 10;
 
 pub fn generate_program(
-    rng: &mut impl Rng,
+    rng: &mut dyn RngCore,
     budget: usize,
     max_depth: usize,
     generators: &[Generator],
@@ -57,7 +58,7 @@ pub fn generate_program(
 }
 
 fn pick_weighted<'a>(
-    rng: &mut impl Rng,
+    rng: &mut dyn RngCore,
     generators: &'a [Generator],
     total_weight: f64,
 ) -> Option<&'a Generator> {

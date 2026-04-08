@@ -252,8 +252,10 @@ dependencies = [
 name = "fuzzilua-mutate"
 version = "0.1.0"
 dependencies = [
+ "fuzzilua-gen",
  "fuzzilua-ir",
  "rand",
+ "tracing",
 ]
 
 [[package]]
