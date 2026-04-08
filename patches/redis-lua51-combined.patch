@@ -1,0 +1,193 @@
+diff --git a/deps/lua/src/lmem.c b/deps/lua/src/lmem.c
+index ae7d8c965f6e..89a96241d061 100644
+--- a/deps/lua/src/lmem.c
++++ b/deps/lua/src/lmem.c
+@@ -5,6 +5,19 @@
+ */
+ 
+ 
++#ifdef FUZZILUA_GC_STRESS
++#include <sys/mman.h>
++#include <sys/stat.h>
++#include <fcntl.h>
++#include <stdlib.h>
++#include <unistd.h>
++#include <stdint.h>
++#endif
++
++#ifdef FUZZILUA_ALLOC_FAIL
++#include <stdlib.h>
++#endif
++
+ #include <stddef.h>
+ 
+ #define lmem_c
+@@ -18,6 +31,92 @@
+ #include "lobject.h"
+ #include "lstate.h"
+ 
++#ifdef FUZZILUA_GC_STRESS
++#include "lgc.h"
++
++#ifndef FUZZILUA_GC_STRESS_INTERVAL
++#define FUZZILUA_GC_STRESS_INTERVAL 1
++#endif
++
++#ifndef FUZZILUA_GC_STRESS_MODE
++#define FUZZILUA_GC_STRESS_MODE 1
++#endif
++
++#define FUZZILUA_GC_BITMAP_SIZE FUZZILUA_BITMAP_SIZE
++
++static uint8_t *fuzzilua_gc_bitmap = NULL;
++static uint32_t fuzzilua_gc_bitmap_size = 0;
++static uint32_t fuzzilua_alloc_counter = 0;
++
++__attribute__((constructor))
++static void fuzzilua_gc_init(void) {
++    const char *shm_name = getenv("FUZZILUA_SHM_GC");
++    if (!shm_name || shm_name[0] == '\0')
++        return;
++
++    int fd = shm_open(shm_name, O_RDWR, 0);
++    if (fd < 0)
++        return;
++
++    /* Layout: [edge (FUZZILUA_BITMAP_SIZE) | gc (FUZZILUA_BITMAP_SIZE)] */
++    size_t total_size = FUZZILUA_GC_BITMAP_SIZE * 2;
++    uint8_t *base = (uint8_t *)mmap(NULL, total_size, PROT_READ | PROT_WRITE,
++                                     MAP_SHARED, fd, 0);
++    close(fd);
++
++    if (base == MAP_FAILED)
++        return;
++
++    fuzzilua_gc_bitmap = base + FUZZILUA_GC_BITMAP_SIZE;
++    fuzzilua_gc_bitmap_size = FUZZILUA_GC_BITMAP_SIZE;
++}
++
++static inline uint32_t fuzzilua_gc_hash(uintptr_t alloc_site,
++                                         uint8_t gc_phase,
++                                         uint32_t gc_debt_bucket) {
++    uint32_t h = (uint32_t)(alloc_site >> 4);
++    h ^= (uint32_t)gc_phase * 0x9e3779b1u;
++    h ^= gc_debt_bucket * 0x517cc1b7u;
++    return h;
++}
++
++/* Bucket the GC debt (gcdept) into coarse ranges.
++ * Lua 5.1 gcdept is lu_mem (unsigned), represents how far behind GC is. */
++static inline uint32_t fuzzilua_debt_bucket(lu_mem debt) {
++    if (debt == 0) return 0;
++    if (debt < 1024) return 1;
++    if (debt < 16384) return 2;
++    return 3;
++}
++
++static inline void fuzzilua_record_gc_coverage(lua_State *L,
++                                                uintptr_t alloc_site) {
++    if (!fuzzilua_gc_bitmap || !G(L)->GCthreshold)
++        return;
++
++    global_State *g = G(L);
++    uint8_t phase = (uint8_t)g->gcstate;
++    uint32_t bucket = fuzzilua_debt_bucket(g->gcdept);
++    uint32_t idx = fuzzilua_gc_hash(alloc_site, phase, bucket)
++                   % fuzzilua_gc_bitmap_size;
++
++    uint8_t old = fuzzilua_gc_bitmap[idx];
++    if (old < 255)
++        fuzzilua_gc_bitmap[idx] = old + 1;
++}
++
++static inline void fuzzilua_gc_stress_hook(lua_State *L) {
++    global_State *g = G(L);
++    if (!g->GCthreshold)
++        return;
++    if (++fuzzilua_alloc_counter >= FUZZILUA_GC_STRESS_INTERVAL) {
++        fuzzilua_alloc_counter = 0;
++        g->GCthreshold = g->totalbytes;
++    }
++}
++
++#endif /* FUZZILUA_GC_STRESS */
++
+ 
+ 
+ /*
+@@ -40,6 +139,36 @@
+ 
+ 
+ 
++#ifdef FUZZILUA_ALLOC_FAIL
++
++static double fuzzilua_alloc_fail_prob = 0.0;
++static unsigned int fuzzilua_alloc_fail_seed = 0;
++static int fuzzilua_alloc_fail_inited = 0;
++
++static void fuzzilua_alloc_fail_init(void) {
++    if (fuzzilua_alloc_fail_inited)
++        return;
++    fuzzilua_alloc_fail_inited = 1;
++
++    const char *env = getenv("FUZZILUA_ALLOC_FAIL_PROB");
++    if (env && env[0] != '\0')
++        fuzzilua_alloc_fail_prob = strtod(env, NULL);
++
++    fuzzilua_alloc_fail_seed = (unsigned int)getpid() ^ 0xdeadbeef;
++}
++
++static int fuzzilua_should_fail(void) {
++    if (fuzzilua_alloc_fail_prob <= 0.0)
++        return 0;
++    fuzzilua_alloc_fail_seed ^= fuzzilua_alloc_fail_seed << 13;
++    fuzzilua_alloc_fail_seed ^= fuzzilua_alloc_fail_seed >> 17;
++    fuzzilua_alloc_fail_seed ^= fuzzilua_alloc_fail_seed << 5;
++    double r = (double)fuzzilua_alloc_fail_seed / (double)0xFFFFFFFFu;
++    return r < fuzzilua_alloc_fail_prob;
++}
++
++#endif /* FUZZILUA_ALLOC_FAIL */
++
+ #define MINSIZEARRAY	4
+ 
+ 
+@@ -77,10 +206,25 @@ void *luaM_realloc_ (lua_State *L, void *block, size_t osize, size_t nsize) {
+   global_State *g = G(L);
+   lua_assert((osize == 0) == (block == NULL));
+   block = (*g->frealloc)(g->ud, block, osize, nsize);
++#ifdef FUZZILUA_ALLOC_FAIL
++  if (nsize > 0 && nsize >= osize) {
++    fuzzilua_alloc_fail_init();
++    if (block != NULL && fuzzilua_should_fail()) {
++      block = NULL;
++    }
++  }
++#endif
+   if (block == NULL && nsize > 0)
+     luaD_throw(L, LUA_ERRMEM);
+   lua_assert((nsize == 0) == (block == NULL));
+   g->totalbytes = (g->totalbytes - osize) + nsize;
++
++#ifdef FUZZILUA_GC_STRESS
++  if (nsize > 0) {
++    fuzzilua_record_gc_coverage(L, (uintptr_t)__builtin_return_address(0));
++    fuzzilua_gc_stress_hook(L);
++  }
++#endif
+   return block;
+ }
+ 
+diff --git a/src/Makefile b/src/Makefile
+index 24b9a39ba2a5..c61f67eabb88 100644
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -382,7 +382,7 @@ endif
+ 
+ REDIS_SERVER_NAME=redis-server$(PROG_SUFFIX)
+ REDIS_SENTINEL_NAME=redis-sentinel$(PROG_SUFFIX)
+-REDIS_SERVER_OBJ=threads_mngr.o memory_prefetch.o adlist.o quicklist.o ae.o anet.o dict.o ebuckets.o eventnotifier.o iothread.o mstr.o entry.o kvstore.o fwtree.o estore.o server.o sds.o zmalloc.o lzf_c.o lzf_d.o pqsort.o zipmap.o sha1.o ziplist.o release.o networking.o util.o object.o db.o replication.o rdb.o t_string.o t_list.o t_set.o t_zset.o t_hash.o config.o aof.o pubsub.o multi.o debug.o sort.o intset.o syncio.o cluster.o cluster_asm.o cluster_legacy.o cluster_slot_stats.o crc16.o endianconv.o slowlog.o eval.o bio.o rio.o rand.o memtest.o syscheck.o crcspeed.o crccombine.o crc64.o bitops.o sentinel.o notify.o setproctitle.o blocked.o hyperloglog.o latency.o sparkline.o redis-check-rdb.o redis-check-aof.o geo.o lazyfree.o module.o evict.o expire.o geohash.o geohash_helper.o childinfo.o defrag.o siphash.o rax.o t_stream.o listpack.o localtime.o lolwut.o lolwut5.o lolwut6.o lolwut8.o acl.o tracking.o socket.o tls.o sha256.o timeout.o setcpuaffinity.o monotonic.o mt19937-64.o resp_parser.o call_reply.o script_lua.o script.o functions.o function_lua.o commands.o strl.o connection.o unix.o logreqres.o keymeta.o chk.o hotkeys.o
++REDIS_SERVER_OBJ=fuzzilua_coverage.o threads_mngr.o memory_prefetch.o adlist.o quicklist.o ae.o anet.o dict.o ebuckets.o eventnotifier.o iothread.o mstr.o entry.o kvstore.o fwtree.o estore.o server.o sds.o zmalloc.o lzf_c.o lzf_d.o pqsort.o zipmap.o sha1.o ziplist.o release.o networking.o util.o object.o db.o replication.o rdb.o t_string.o t_list.o t_set.o t_zset.o t_hash.o config.o aof.o pubsub.o multi.o debug.o sort.o intset.o syncio.o cluster.o cluster_asm.o cluster_legacy.o cluster_slot_stats.o crc16.o endianconv.o slowlog.o eval.o bio.o rio.o rand.o memtest.o syscheck.o crcspeed.o crccombine.o crc64.o bitops.o sentinel.o notify.o setproctitle.o blocked.o hyperloglog.o latency.o sparkline.o redis-check-rdb.o redis-check-aof.o geo.o lazyfree.o module.o evict.o expire.o geohash.o geohash_helper.o childinfo.o defrag.o siphash.o rax.o t_stream.o listpack.o localtime.o lolwut.o lolwut5.o lolwut6.o lolwut8.o acl.o tracking.o socket.o tls.o sha256.o timeout.o setcpuaffinity.o monotonic.o mt19937-64.o resp_parser.o call_reply.o script_lua.o script.o functions.o function_lua.o commands.o strl.o connection.o unix.o logreqres.o keymeta.o chk.o hotkeys.o
+ REDIS_CLI_NAME=redis-cli$(PROG_SUFFIX)
+ REDIS_CLI_OBJ=anet.o adlist.o dict.o redis-cli.o zmalloc.o release.o ae.o redisassert.o crcspeed.o crccombine.o crc64.o siphash.o crc16.o monotonic.o cli_common.o mt19937-64.o strl.o cli_commands.o
+ REDIS_BENCHMARK_NAME=redis-benchmark$(PROG_SUFFIX)
