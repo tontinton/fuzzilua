@@ -1,5 +1,5 @@
 diff --git a/deps/lua/src/lmem.c b/deps/lua/src/lmem.c
-index ae7d8c965f6e..89a96241d061 100644
+index ae7d8c965f6e..686a717af9f8 100644
 --- a/deps/lua/src/lmem.c
 +++ b/deps/lua/src/lmem.c
 @@ -5,6 +5,19 @@
@@ -160,18 +160,25 @@ index ae7d8c965f6e..89a96241d061 100644
  #define MINSIZEARRAY	4
  
  
-@@ -77,10 +206,25 @@ void *luaM_realloc_ (lua_State *L, void *block, size_t osize, size_t nsize) {
+@@ -76,11 +213,31 @@ void *luaM_toobig (lua_State *L) {
+ void *luaM_realloc_ (lua_State *L, void *block, size_t osize, size_t nsize) {
    global_State *g = G(L);
    lua_assert((osize == 0) == (block == NULL));
-   block = (*g->frealloc)(g->ud, block, osize, nsize);
 +#ifdef FUZZILUA_ALLOC_FAIL
-+  if (nsize > 0 && nsize >= osize) {
++  /* Inject allocation failures BEFORE calling the real allocator.
++   * This is critical for realloc: if the real realloc succeeds, it frees
++   * the old block. Pretending it failed after that creates a dangling
++   * pointer (caller still holds old ptr) -- an impossible state that a
++   * real allocator can never produce. By injecting before, the old block
++   * is preserved, matching real OOM semantics. */
++  if (nsize > 0 && nsize > osize) {
 +    fuzzilua_alloc_fail_init();
-+    if (block != NULL && fuzzilua_should_fail()) {
-+      block = NULL;
++    if (fuzzilua_should_fail()) {
++      luaD_throw(L, LUA_ERRMEM);
 +    }
 +  }
 +#endif
+   block = (*g->frealloc)(g->ud, block, osize, nsize);
    if (block == NULL && nsize > 0)
      luaD_throw(L, LUA_ERRMEM);
    lua_assert((nsize == 0) == (block == NULL));
@@ -185,7 +192,7 @@ index ae7d8c965f6e..89a96241d061 100644
 +#endif
    return block;
  }
- 
+-
 diff --git a/src/Makefile b/src/Makefile
 index 24b9a39ba2a5..c61f67eabb88 100644
 --- a/src/Makefile
