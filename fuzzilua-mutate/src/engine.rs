@@ -3,10 +3,11 @@ use rand::Rng;
 use tracing::trace;
 
 use crate::mutators::{
-    CallbackGcMutator, ChainDepthMutator, CodeGenMutator, CombineMutator, EnvironmentMutator,
-    GcInjectionMutator, InputMutator, InstructionDeleteMutator, InterleaveMutator,
-    LoadstringWrapMutator, MetamethodSwapMutator, Mutator, OperationMutator, PcallWrapMutator,
-    SpliceMutator, TableSizeMutator, TypeConfusionMutator,
+    CallbackGcMutator, ChainDepthMutator, CodeGenMutator, CombineMutator,
+    CoroutineYieldInjectionMutator, EnvironmentMutator, GcInjectionMutator, InputMutator,
+    InstructionDeleteMutator, InterleaveMutator, LoadstringWrapMutator, MetamethodSwapMutator,
+    Mutator, OperationMutator, PcallWrapMutator, SpliceMutator, TableSizeMutator,
+    TypeConfusionMutator,
 };
 
 const MIN_MUTATIONS_PER_ROUND: u32 = 1;
@@ -40,6 +41,7 @@ impl MutationEngine {
             (Box::new(TypeConfusionMutator), 10.0),
             (Box::new(PcallWrapMutator), 6.0),
             (Box::new(EnvironmentMutator), 5.0),
+            (Box::new(CoroutineYieldInjectionMutator), 12.0),
         ])
     }
 

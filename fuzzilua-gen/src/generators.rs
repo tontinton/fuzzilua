@@ -486,6 +486,230 @@ fn gen_weak_table(b: &mut ProgramBuilder, rng: &mut dyn RngCore) -> Option<()> {
 
 // -- Finalizer (__gc via newproxy) -------------------------------------------
 
+fn gen_newproxy_finalizer(b: &mut ProgramBuilder, rng: &mut dyn RngCore) -> Option<()> {
+    let count = rng.random_range(1..=4);
+    let gc_action = match rng.random_range(0..5u8) {
+        0 => "collectgarbage('collect') collectgarbage('collect')",
+        1 => "collectgarbage('step') for j=1,10 do local t={} end",
+        2 => "collectgarbage('collect') local s=string.rep('x',1000)",
+        3 => "collectgarbage('step') collectgarbage('collect') local t=setmetatable({},{__index=function() return 0 end})",
+        _ => "for j=1,5 do local t={} t[j]=string.rep('a',j*100) end collectgarbage('step')",
+    };
+    let lua = format!(
+        "return function() \
+            local refs = {{}} \
+            for i = 1, {count} do \
+                local p = newproxy(true) \
+                local mt = getmetatable(p) \
+                mt.__gc = function(self) {gc_action} end \
+                refs[i] = p \
+            end \
+            refs = nil \
+            collectgarbage('collect') \
+            collectgarbage('collect') \
+        end"
+    );
+    emit_loadstring_call(b, &lua, vec![], 0)?;
+    Some(())
+}
+
+fn gen_finalizer_resurrection(b: &mut ProgramBuilder, rng: &mut dyn RngCore) -> Option<()> {
+    let pattern = match rng.random_range(0..3u8) {
+        0 => {
+            // Resurrect into external table during __gc
+            "return function() \
+                local alive = {} \
+                local weak = setmetatable({}, {__mode='v'}) \
+                for i = 1, 3 do \
+                    local p = newproxy(true) \
+                    getmetatable(p).__gc = function(self) \
+                        alive[#alive+1] = {} \
+                        collectgarbage('step') \
+                    end \
+                    weak[i] = p \
+                end \
+                collectgarbage('collect') \
+                collectgarbage('collect') \
+                for i,v in ipairs(alive) do end \
+            end"
+                .to_string()
+        }
+        1 => {
+            // Chain of finalizers referencing each other
+            "return function() \
+                local chain = {} \
+                for i = 1, 4 do \
+                    local p = newproxy(true) \
+                    getmetatable(p).__gc = function(self) \
+                        if chain[i-1] then local _ = chain[i-1] end \
+                        collectgarbage('step') \
+                        chain[i] = nil \
+                    end \
+                    chain[i] = p \
+                end \
+                chain = nil \
+                collectgarbage('collect') \
+                collectgarbage('collect') \
+                collectgarbage('collect') \
+            end"
+                .to_string()
+        }
+        _ => {
+            // Finalizer that triggers error + GC
+            "return function() \
+                local p = newproxy(true) \
+                getmetatable(p).__gc = function(self) \
+                    collectgarbage('collect') \
+                    for i=1,20 do local t={} end \
+                    pcall(error, 'gc error') \
+                end \
+                p = nil \
+                collectgarbage('collect') \
+                collectgarbage('collect') \
+            end"
+                .to_string()
+        }
+    };
+    emit_loadstring_call(b, &pattern, vec![], 0)?;
+    Some(())
+}
+
+fn gen_yield_in_callback(b: &mut ProgramBuilder, rng: &mut dyn RngCore) -> Option<()> {
+    let pattern = match rng.random_range(0..4u8) {
+        0 => {
+            // Yield in sort comparator (errors in Lua 5.1 but error path is interesting)
+            "return function() \
+                local co = coroutine.create(function() \
+                    local t = {3,1,4,1,5,9,2,6} \
+                    table.sort(t, function(a,b) \
+                        coroutine.yield() \
+                        return a < b \
+                    end) \
+                end) \
+                for i = 1, 20 do \
+                    local ok = coroutine.resume(co) \
+                    if not ok then break end \
+                    collectgarbage('step') \
+                end \
+            end"
+                .to_string()
+        }
+        1 => {
+            // Yield in __index metamethod inside coroutine
+            "return function() \
+                local mt = {__index = function(t, k) \
+                    coroutine.yield(k) \
+                    collectgarbage('step') \
+                    return k \
+                end} \
+                local co = coroutine.create(function() \
+                    local t = setmetatable({}, mt) \
+                    for i = 1, 10 do \
+                        local _ = t[i] \
+                        collectgarbage('step') \
+                    end \
+                end) \
+                for i = 1, 20 do \
+                    local ok = coroutine.resume(co) \
+                    if not ok then break end \
+                end \
+            end"
+                .to_string()
+        }
+        2 => {
+            // Yield in __newindex + GC pressure
+            "return function() \
+                local stored = {} \
+                local mt = {__newindex = function(t, k, v) \
+                    coroutine.yield(v) \
+                    collectgarbage('collect') \
+                    stored[k] = v \
+                end} \
+                local co = coroutine.create(function() \
+                    local t = setmetatable({}, mt) \
+                    for i = 1, 10 do t[i] = {} end \
+                end) \
+                for i = 1, 20 do \
+                    local ok = coroutine.resume(co) \
+                    if not ok then break end \
+                end \
+            end"
+                .to_string()
+        }
+        _ => {
+            // Yield in __tostring during error formatting
+            "return function() \
+                local mt = {__tostring = function(self) \
+                    coroutine.yield('tostring') \
+                    collectgarbage('step') \
+                    return 'obj' \
+                end} \
+                local co = coroutine.create(function() \
+                    local obj = setmetatable({}, mt) \
+                    local s = tostring(obj) \
+                    collectgarbage('collect') \
+                    error(obj) \
+                end) \
+                for i = 1, 10 do \
+                    local ok, val = coroutine.resume(co) \
+                    if not ok then break end \
+                    collectgarbage('step') \
+                end \
+            end"
+                .to_string()
+        }
+    };
+    emit_loadstring_call(b, &pattern, vec![], 0)?;
+    Some(())
+}
+
+fn gen_weak_finalizer_interaction(b: &mut ProgramBuilder, rng: &mut dyn RngCore) -> Option<()> {
+    let pattern = match rng.random_range(0..2u8) {
+        0 => {
+            // Weak table + finalizer: __gc accesses weak table being swept
+            "return function() \
+                local weak = setmetatable({}, {__mode='kv'}) \
+                for i = 1, 5 do \
+                    local k = newproxy(true) \
+                    getmetatable(k).__gc = function(self) \
+                        for k2,v2 in pairs(weak) do end \
+                        collectgarbage('step') \
+                    end \
+                    weak[k] = setmetatable({}, {__gc = function() \
+                        collectgarbage('step') \
+                    end}) \
+                end \
+                collectgarbage('collect') \
+                collectgarbage('collect') \
+            end"
+                .to_string()
+        }
+        _ => {
+            // Modify weak table during GC sweep via finalizer
+            "return function() \
+                local weak = setmetatable({}, {__mode='v'}) \
+                local anchors = {} \
+                for i = 1, 5 do \
+                    local p = newproxy(true) \
+                    getmetatable(p).__gc = function(self) \
+                        weak[tostring(self)] = {} \
+                        collectgarbage('step') \
+                    end \
+                    weak[i] = p \
+                    anchors[i] = p \
+                end \
+                anchors = nil \
+                collectgarbage('collect') \
+                collectgarbage('collect') \
+                for k,v in pairs(weak) do end \
+            end"
+                .to_string()
+        }
+    };
+    emit_loadstring_call(b, &pattern, vec![], 0)?;
+    Some(())
+}
+
 // -- Loadstring --------------------------------------------------------------
 
 // -- Upvalue -----------------------------------------------------------------
@@ -1252,6 +1476,26 @@ pub fn all_generators() -> Vec<Generator> {
             name: "unpack_large_range",
             weight: 5.0,
             generate: gen_unpack_large_range,
+        },
+        Generator {
+            name: "newproxy_finalizer",
+            weight: 8.0,
+            generate: gen_newproxy_finalizer,
+        },
+        Generator {
+            name: "finalizer_resurrection",
+            weight: 7.0,
+            generate: gen_finalizer_resurrection,
+        },
+        Generator {
+            name: "yield_in_callback",
+            weight: 8.0,
+            generate: gen_yield_in_callback,
+        },
+        Generator {
+            name: "weak_finalizer_interaction",
+            weight: 7.0,
+            generate: gen_weak_finalizer_interaction,
         },
     ];
 

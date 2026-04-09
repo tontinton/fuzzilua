@@ -55,6 +55,18 @@ pub struct Cli {
 
     #[arg(
         long,
+        help = "Inject .lua files from a directory as corpus seeds, then exit"
+    )]
+    pub inject_lua: Option<PathBuf>,
+
+    #[arg(
+        long,
+        help = "Watch a directory for new .lua files and hot-load them as seeds"
+    )]
+    pub seed_dir: Option<PathBuf>,
+
+    #[arg(
+        long,
         value_parser = parse_ratio,
         help = "Probability of allocation failure injection (0.0-1.0)"
     )]

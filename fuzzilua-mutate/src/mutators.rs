@@ -1087,6 +1087,84 @@ impl PcallWrapMutator {
     }
 }
 
+pub struct CoroutineYieldInjectionMutator;
+
+impl Mutator for CoroutineYieldInjectionMutator {
+    fn name(&self) -> &'static str {
+        "CoroutineYieldInjectionMutator"
+    }
+
+    fn mutate(&self, program: &mut Program, rng: &mut dyn RngCore) -> bool {
+        // Find function blocks that are used as metamethods or callbacks
+        let fn_blocks = find_fn_blocks(program);
+        if fn_blocks.is_empty() {
+            return false;
+        }
+
+        let interesting: Vec<_> = fn_blocks
+            .iter()
+            .copied()
+            .filter(|&(_, _, fv)| {
+                is_metamethod_fn(program, fv)
+                    || program.instructions.iter().any(|instr| {
+                        matches!(&instr.op, Op::CallFunction { .. })
+                            && instr.inputs.len() >= 2
+                            && instr.inputs[1..].contains(&fv)
+                    })
+            })
+            .collect();
+
+        let targets = if !interesting.is_empty() {
+            &interesting
+        } else {
+            &fn_blocks
+        };
+
+        let &(fn_start, fn_end, _) = pick_random(targets, rng);
+
+        // Don't inject if there's already a yield in this function body
+        let has_yield = (fn_start..fn_end)
+            .any(|i| matches!(program.instructions[i].op, Op::CoroutineYield));
+        if has_yield {
+            return false;
+        }
+
+        // Insert yield + GC right after the function header
+        let insert_at = fn_start + 1;
+        if insert_at >= fn_end {
+            return false;
+        }
+
+        let mut new_instrs = vec![
+            Instruction {
+                op: Op::CoroutineYield,
+                inputs: vec![],
+                outputs: vec![],
+            },
+            Instruction {
+                op: Op::CollectGarbage(GcMode::Collect),
+                inputs: vec![],
+                outputs: vec![],
+            },
+        ];
+
+        // Sometimes also add allocation pressure
+        if rng.random_bool(0.5) {
+            new_instrs.push(Instruction {
+                op: Op::CreateTable,
+                inputs: vec![],
+                outputs: vec![Variable(program.next_var)],
+            });
+            program.next_var += 1;
+        }
+
+        let tail = program.instructions.split_off(insert_at);
+        program.instructions.extend(new_instrs);
+        program.instructions.extend(tail);
+        true
+    }
+}
+
 pub struct EnvironmentMutator;
 
 impl Mutator for EnvironmentMutator {

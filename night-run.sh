@@ -153,9 +153,12 @@ if [[ "$OVERSEER_ONLY" == false ]]; then
         die "Fuzzer already running (pid $(cat "$FUZZER_PID_FILE")). Use --overseer-only or --stop first."
     fi
 
+    LLM_SEED_DIR="${LLM_SEED_DIR:-llm-seeds}"
+    mkdir -p "$LLM_SEED_DIR"
+
     log "Starting fuzzer:"
     log "  workers=$WORKERS gen_ratio=$GENERATION_RATIO timeout=$TIMEOUT"
-    log "  alloc_fail=$ALLOC_FAIL_PROB minimize=off"
+    log "  alloc_fail=$ALLOC_FAIL_PROB minimize=off seed_dir=$LLM_SEED_DIR"
     log "  corpus=$CORPUS_DIR stats=$STATS_JSON"
 
     cargo run --release -- \
@@ -168,6 +171,7 @@ if [[ "$OVERSEER_ONLY" == false ]]; then
         --timeout "$TIMEOUT" \
         --alloc-fail-prob "$ALLOC_FAIL_PROB" \
         --no-minimize \
+        --seed-dir "$LLM_SEED_DIR" \
         > "$FUZZER_LOG" 2>&1 &
     FUZZER_PID=$!
     echo "$FUZZER_PID" > "$FUZZER_PID_FILE"

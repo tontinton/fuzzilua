@@ -33,6 +33,10 @@ fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
+    if let Some(ref path) = cli.inject_lua {
+        return run_inject_lua(&cli, path);
+    }
+
     if let Some(ref path) = cli.reproduce {
         return run_reproduce(&cli, path);
     }
@@ -42,6 +46,60 @@ fn main() -> Result<()> {
     }
 
     run_fuzz(&cli)
+}
+
+fn run_inject_lua(cli: &Cli, lua_dir: &std::path::Path) -> Result<()> {
+    use fuzzilua_ir::{Instruction, Op, Program, Variable};
+    use std::sync::Arc;
+
+    fs::create_dir_all(&cli.corpus)?;
+    let mut corpus = load_or_create_corpus(cli)?;
+    let before = corpus.len();
+
+    let mut lua_files: Vec<_> = fs::read_dir(lua_dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "lua"))
+        .collect();
+    lua_files.sort();
+
+    for path in &lua_files {
+        let lua_code = fs::read_to_string(path)?;
+        if lua_code.trim().is_empty() {
+            continue;
+        }
+
+        let program = Program {
+            instructions: vec![
+                Instruction {
+                    op: Op::LoadString(Arc::from(lua_code.as_str())),
+                    inputs: vec![],
+                    outputs: vec![Variable(0)],
+                },
+                Instruction {
+                    op: Op::Loadstring,
+                    inputs: vec![Variable(0)],
+                    outputs: vec![Variable(1)],
+                },
+                Instruction {
+                    op: Op::CallFunction {
+                        arg_count: 0,
+                        ret_count: 0,
+                    },
+                    inputs: vec![Variable(1)],
+                    outputs: vec![],
+                },
+            ],
+            next_var: 2,
+        };
+
+        corpus.add_blind(program);
+        info!(file = %path.display(), "injected lua seed");
+    }
+
+    let added = corpus.len() - before;
+    info!(added, total = corpus.len(), "injection complete");
+    Ok(())
 }
 
 fn run_reproduce(cli: &Cli, path: &std::path::Path) -> Result<()> {
@@ -143,9 +201,14 @@ fn run_fuzz(cli: &Cli) -> Result<()> {
     }
 
     let mut reporter = StatsReporter::new(cli.stats_interval, cli.stats_json.clone(), jobs);
+    let mut seed_watcher = cli.seed_dir.as_ref().map(|dir| SeedWatcher::new(dir.clone()));
 
     while !shared.shutdown.load(Ordering::Relaxed) {
         thread::sleep(std::time::Duration::from_millis(500));
+
+        if let Some(ref mut watcher) = seed_watcher {
+            watcher.poll(&shared);
+        }
 
         let corpus = shared.corpus.read().unwrap();
         let unique_crashes = shared.crash_db.lock().unwrap().unique_count();
@@ -223,6 +286,99 @@ fn load_or_create_corpus(cli: &Cli) -> Result<Corpus> {
                 cli.edge_size,
                 cli.gc_size,
             ))
+        }
+    }
+}
+
+struct SeedWatcher {
+    dir: std::path::PathBuf,
+    loaded_dir: std::path::PathBuf,
+    last_poll: std::time::Instant,
+}
+
+impl SeedWatcher {
+    fn new(dir: std::path::PathBuf) -> Self {
+        let loaded_dir = dir.join(".loaded");
+        Self {
+            dir,
+            loaded_dir,
+            last_poll: std::time::Instant::now(),
+        }
+    }
+
+    fn poll(&mut self, shared: &SharedState) {
+        // Check every 5 seconds
+        if self.last_poll.elapsed() < std::time::Duration::from_secs(5) {
+            return;
+        }
+        self.last_poll = std::time::Instant::now();
+
+        let entries = match fs::read_dir(&self.dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+
+        let mut lua_files: Vec<std::path::PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "lua"))
+            .collect();
+
+        if lua_files.is_empty() {
+            return;
+        }
+
+        lua_files.sort();
+        let _ = fs::create_dir_all(&self.loaded_dir);
+
+        use fuzzilua_ir::{Instruction, Op, Program, Variable};
+        use std::sync::Arc;
+
+        let mut loaded = 0u32;
+        for path in &lua_files {
+            let lua_code = match fs::read_to_string(path) {
+                Ok(s) if !s.trim().is_empty() => s,
+                _ => continue,
+            };
+
+            let program = Program {
+                instructions: vec![
+                    Instruction {
+                        op: Op::LoadString(Arc::from(lua_code.as_str())),
+                        inputs: vec![],
+                        outputs: vec![Variable(0)],
+                    },
+                    Instruction {
+                        op: Op::Loadstring,
+                        inputs: vec![Variable(0)],
+                        outputs: vec![Variable(1)],
+                    },
+                    Instruction {
+                        op: Op::CallFunction {
+                            arg_count: 0,
+                            ret_count: 0,
+                        },
+                        inputs: vec![Variable(1)],
+                        outputs: vec![],
+                    },
+                ],
+                next_var: 2,
+            };
+
+            {
+                let mut corpus = shared.corpus.write().unwrap();
+                corpus.add_blind(program);
+            }
+            loaded += 1;
+
+            // Move to .loaded/ so we don't re-ingest
+            if let Some(name) = path.file_name() {
+                let _ = fs::rename(path, self.loaded_dir.join(name));
+            }
+        }
+
+        if loaded > 0 {
+            info!(loaded, "hot-loaded new lua seeds");
         }
     }
 }

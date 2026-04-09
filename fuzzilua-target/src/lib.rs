@@ -102,8 +102,8 @@ impl SandboxConfig {
                 "require".into(),
             ],
             max_execution_time: exec_timeout,
-            has_coroutines: false,
-            has_loadstring: false,
+            has_coroutines: true,
+            has_loadstring: true,
         }
     }
 }

@@ -13,7 +13,7 @@ use tracing::{debug, info, warn};
 use crate::resp::{RespClient, RespValue};
 use crate::{ENV_SHM_EDGE, ENV_SHM_GC};
 
-const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(1);
 const DEFAULT_CONSECUTIVE_TIMEOUT_THRESHOLD: u32 = 3;
 const CONNECT_BACKOFF_INITIAL: Duration = Duration::from_millis(10);
 const CONNECT_BACKOFF_MAX: Duration = Duration::from_secs(2);
@@ -117,7 +117,7 @@ impl RedisTarget {
         cmd.env(ENV_SHM_GC, &self.shm_name);
         cmd.env(
             "ASAN_OPTIONS",
-            "detect_leaks=0:abort_on_error=1:symbolize=1",
+            "detect_leaks=0:abort_on_error=1:symbolize=1:detect_stack_use_after_return=1:halt_on_error=1",
         );
 
         for (key, val) in &self.config.extra_env {
