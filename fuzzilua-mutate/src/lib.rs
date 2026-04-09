@@ -8,9 +8,9 @@ pub use hybrid::HybridEngine;
 pub use mutators::{
     CallbackGcMutator, ChainDepthMutator, CodeGenMutator, CombineMutator,
     CoroutineYieldInjectionMutator, EnvironmentMutator, GcInjectionMutator, InputMutator,
-    InstructionDeleteMutator, InterleaveMutator, LoadstringContentMutator,
-    LoadstringWrapMutator, MetamethodSwapMutator, Mutator, OperationMutator, PcallWrapMutator,
-    SpliceMutator, TableSizeMutator, TypeConfusionMutator,
+    InstructionDeleteMutator, InterleaveMutator, LoadstringContentMutator, LoadstringWrapMutator,
+    MetamethodSwapMutator, Mutator, OperationMutator, PcallWrapMutator, SpliceMutator,
+    TableSizeMutator, TypeConfusionMutator,
 };
 
 #[cfg(test)]

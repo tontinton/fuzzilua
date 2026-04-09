@@ -20,7 +20,7 @@ pub(crate) fn fill_random(
     rng: &mut dyn RngCore,
 ) {
     let total_weight: f64 = generators.iter().map(|g| g.weight).sum();
-    let count = rng.random_range(1..=3);
+    let count = rng.random_range(3..=8);
     for _ in 0..count {
         if builder.remaining_budget() == 0 {
             return;
@@ -481,6 +481,542 @@ impl ProgramTemplate for UpvalueLifetime {
     }
 }
 
+// -- WeakTableResurrection ---------------------------------------------------
+
+pub struct WeakTableResurrection;
+
+impl ProgramTemplate for WeakTableResurrection {
+    fn name(&self) -> &'static str {
+        "weak_table_resurrection"
+    }
+
+    fn generate(&self, b: &mut ProgramBuilder, generators: &[Generator], rng: &mut dyn RngCore) {
+        // Finalizers that resurrect objects by storing them in a strong table,
+        // combined with weak table iteration during GC sweep.
+        let lua = match rng.random_range(0..3u8) {
+            0 => {
+                "return function() \
+                local strong = {} \
+                local weak = setmetatable({}, {__mode='v'}) \
+                for i=1,8 do \
+                    local p = newproxy(true) \
+                    getmetatable(p).__gc = function(self) strong[#strong+1] = self end \
+                    weak[i] = p \
+                end \
+                collectgarbage('collect') \
+                collectgarbage('collect') \
+                for k,v in pairs(weak) do collectgarbage('step') end \
+            end"
+            }
+            1 => {
+                "return function() \
+                local weak_k = setmetatable({}, {__mode='k'}) \
+                local weak_v = setmetatable({}, {__mode='v'}) \
+                local anchor = {} \
+                for i=1,10 do \
+                    local t = setmetatable({}, {__gc=function() collectgarbage('step') end}) \
+                    weak_k[t] = i \
+                    weak_v[i] = t \
+                    if i % 2 == 0 then anchor[i] = t end \
+                end \
+                anchor = nil \
+                collectgarbage('collect') \
+                for k,v in pairs(weak_k) do end \
+                collectgarbage('collect') \
+            end"
+            }
+            _ => {
+                "return function() \
+                local ephemeron = setmetatable({}, {__mode='k'}) \
+                local keys = {} \
+                for i=1,6 do \
+                    local k = {} \
+                    ephemeron[k] = setmetatable({}, {__gc=function() collectgarbage('step') end}) \
+                    keys[i] = k \
+                end \
+                for i=1,3 do keys[i] = nil end \
+                collectgarbage('collect') \
+                collectgarbage('collect') \
+                for k,v in pairs(ephemeron) do end \
+            end"
+            }
+        };
+        emit_loadstring_call(b, lua, vec![], 0);
+        b.emit(Op::CollectGarbage(GcMode::Collect), vec![]);
+        fill_random(b, generators, rng);
+    }
+}
+
+// -- UpvalueSharing ----------------------------------------------------------
+
+pub struct UpvalueSharing;
+
+impl ProgramTemplate for UpvalueSharing {
+    fn name(&self) -> &'static str {
+        "upvalue_sharing"
+    }
+
+    fn generate(&self, b: &mut ProgramBuilder, generators: &[Generator], rng: &mut dyn RngCore) {
+        // Multiple closures sharing the same upvalue, with mutation and GC
+        // between calls. Stresses open→closed upvalue transitions.
+        let lua = match rng.random_range(0..3u8) {
+            0 => {
+                "return function() \
+                local val = {data='hello'} \
+                local readers = {} \
+                local writers = {} \
+                for i=1,5 do \
+                    readers[i] = function() collectgarbage('step'); return val end \
+                    writers[i] = function(v) val = v; collectgarbage('step') end \
+                end \
+                collectgarbage('collect') \
+                for i=1,5 do \
+                    writers[i]({n=i}) \
+                    collectgarbage('step') \
+                    local _ = readers[(i%5)+1]() \
+                end \
+            end"
+            }
+            1 => {
+                "return function() \
+                local function make_chain(n) \
+                    local captured = {} \
+                    local fns = {} \
+                    for i=1,n do \
+                        captured[i] = {v=i} \
+                        local prev = captured \
+                        fns[i] = function() \
+                            collectgarbage('step') \
+                            return prev[i] \
+                        end \
+                    end \
+                    return fns, captured \
+                end \
+                local fns, caps = make_chain(8) \
+                caps = nil \
+                collectgarbage('collect') \
+                for i=1,8 do pcall(fns[i]) end \
+            end"
+            }
+            _ => {
+                "return function() \
+                local x = 1 \
+                local co = coroutine.create(function() \
+                    for i=1,5 do x = x + 1; coroutine.yield(x) end \
+                end) \
+                local function read() return x end \
+                for i=1,5 do \
+                    coroutine.resume(co) \
+                    collectgarbage('step') \
+                    local _ = read() \
+                end \
+                collectgarbage('collect') \
+            end"
+            }
+        };
+        emit_loadstring_call(b, lua, vec![], 0);
+        fill_random(b, generators, rng);
+    }
+}
+
+// -- TableRehash -------------------------------------------------------------
+
+pub struct TableRehash;
+
+impl ProgramTemplate for TableRehash {
+    fn name(&self) -> &'static str {
+        "table_rehash"
+    }
+
+    fn generate(&self, b: &mut ProgramBuilder, generators: &[Generator], rng: &mut dyn RngCore) {
+        // Force hash table rehashing with GC pressure. Exercises luaH_resize,
+        // array/hash boundary transitions.
+        let lua = match rng.random_range(0..3u8) {
+            0 => {
+                "return function() \
+                local t = {} \
+                for i=1,64 do \
+                    t[tostring(i)] = {} \
+                    if i % 8 == 0 then collectgarbage('step') end \
+                end \
+                for i=1,32 do t[tostring(i)] = nil end \
+                collectgarbage('collect') \
+                for i=65,96 do t[tostring(i)] = {} end \
+                for k,v in pairs(t) do collectgarbage('step') end \
+            end"
+            }
+            1 => {
+                "return function() \
+                local t = {} \
+                for i=1,32 do t[i] = i end \
+                for i=1,32 do t['k'..i] = {} end \
+                collectgarbage('step') \
+                for i=1,16 do t[i] = nil end \
+                for i=33,48 do t[i] = {} end \
+                collectgarbage('collect') \
+                local n = 0 \
+                for k,v in next, t do n = n+1; if n%4==0 then collectgarbage('step') end end \
+            end"
+            }
+            _ => {
+                "return function() \
+                local t = {} \
+                local mt = {__newindex = function(self, k, v) \
+                    collectgarbage('step') \
+                    rawset(self, k, v) \
+                end} \
+                setmetatable(t, mt) \
+                for i=1,48 do t['field'..i] = {i} end \
+                collectgarbage('collect') \
+            end"
+            }
+        };
+        emit_loadstring_call(b, lua, vec![], 0);
+        fill_random(b, generators, rng);
+    }
+}
+
+// -- VarargStress ------------------------------------------------------------
+
+pub struct VarargStress;
+
+impl ProgramTemplate for VarargStress {
+    fn name(&self) -> &'static str {
+        "vararg_stress"
+    }
+
+    fn generate(&self, b: &mut ProgramBuilder, generators: &[Generator], rng: &mut dyn RngCore) {
+        let lua = match rng.random_range(0..3u8) {
+            0 => {
+                "return function() \
+                local function collect(...) \
+                    collectgarbage('step') \
+                    local t = {...} \
+                    for i=1,select('#', ...) do t[i] = tostring(t[i]) end \
+                    return unpack(t) \
+                end \
+                local function make() return {},{},{},{},{} end \
+                local a,b,c,d,e = collect(make()) \
+                collectgarbage('collect') \
+                local _ = collect(a,b,c,d,e) \
+            end"
+            }
+            1 => {
+                "return function() \
+                local function tail(...) \
+                    if select('#', ...) > 1 then \
+                        collectgarbage('step') \
+                        return tail(select(2, ...)) \
+                    end \
+                    return ... \
+                end \
+                local r = tail({},{},{},{},{},{},{},{}) \
+                collectgarbage('collect') \
+            end"
+            }
+            _ => {
+                "return function() \
+                local function pack_gc(...) \
+                    collectgarbage('step') \
+                    return {n=select('#',...),...} \
+                end \
+                local results = {} \
+                for i=1,5 do \
+                    results[i] = pack_gc(string.rep('x',i), {}, true, i) \
+                end \
+                collectgarbage('collect') \
+                for i=1,5 do \
+                    local t = results[i] \
+                    for j=1,t.n do local _ = t[j] end \
+                end \
+            end"
+            }
+        };
+        emit_loadstring_call(b, lua, vec![], 0);
+        fill_random(b, generators, rng);
+    }
+}
+
+// -- ErrorUnwindGc -----------------------------------------------------------
+
+pub struct ErrorUnwindGc;
+
+impl ProgramTemplate for ErrorUnwindGc {
+    fn name(&self) -> &'static str {
+        "error_unwind_gc"
+    }
+
+    fn generate(&self, b: &mut ProgramBuilder, generators: &[Generator], rng: &mut dyn RngCore) {
+        // Error unwinding with active finalizers and __tostring metamethods.
+        let lua = match rng.random_range(0..3u8) {
+            0 => {
+                "return function() \
+                local mt = {__tostring = function() collectgarbage('step'); return 'err' end} \
+                local err_obj = setmetatable({}, mt) \
+                local function inner() \
+                    local p = newproxy(true) \
+                    getmetatable(p).__gc = function() collectgarbage('step') end \
+                    error(err_obj) \
+                end \
+                local ok, e = xpcall(inner, function(err) \
+                    collectgarbage('collect') \
+                    return tostring(err) .. ' handled' \
+                end) \
+            end"
+            }
+            1 => {
+                "return function() \
+                local depth = 0 \
+                local function recur() \
+                    depth = depth + 1 \
+                    local t = {} \
+                    if depth < 5 then \
+                        local ok, err = pcall(recur) \
+                        collectgarbage('step') \
+                        if not ok then error(err, 0) end \
+                    else \
+                        error(setmetatable({}, {__tostring=function() return 'deep' end})) \
+                    end \
+                end \
+                pcall(recur) \
+                collectgarbage('collect') \
+            end"
+            }
+            _ => {
+                "return function() \
+                local live = {} \
+                for i=1,5 do \
+                    local ok = pcall(function() \
+                        live[i] = setmetatable({}, {__gc=function() collectgarbage('step') end}) \
+                        if i == 3 then error('boom') end \
+                    end) \
+                end \
+                live = nil \
+                collectgarbage('collect') \
+                collectgarbage('collect') \
+            end"
+            }
+        };
+        emit_loadstring_call(b, lua, vec![], 0);
+        fill_random(b, generators, rng);
+    }
+}
+
+// -- DebugHookGc -------------------------------------------------------------
+
+pub struct DebugHookGc;
+
+impl ProgramTemplate for DebugHookGc {
+    fn name(&self) -> &'static str {
+        "debug_hook_gc"
+    }
+
+    fn generate(&self, b: &mut ProgramBuilder, generators: &[Generator], rng: &mut dyn RngCore) {
+        // Debug hooks with GC inside — exercises stack manipulation + collection.
+        let lua = match rng.random_range(0..2u8) {
+            0 => {
+                "return function() \
+                local allocs = {} \
+                debug.sethook(function(event, line) \
+                    allocs[#allocs+1] = {} \
+                    if #allocs % 3 == 0 then collectgarbage('step') end \
+                end, 'l', 1) \
+                local t = {} \
+                for i=1,20 do t[i] = string.rep('x', i) end \
+                debug.sethook() \
+                collectgarbage('collect') \
+            end"
+            }
+            _ => {
+                "return function() \
+                local count = 0 \
+                debug.sethook(function() \
+                    count = count + 1 \
+                    if count % 5 == 0 then \
+                        local info = debug.getinfo(2, 'nSl') \
+                        collectgarbage('step') \
+                    end \
+                end, '', 10) \
+                local function work() \
+                    local t = {} \
+                    for i=1,30 do t[i] = {v=i} end \
+                    return t \
+                end \
+                pcall(work) \
+                debug.sethook() \
+            end"
+            }
+        };
+        emit_loadstring_call(b, lua, vec![], 0);
+        fill_random(b, generators, rng);
+    }
+}
+
+// -- StringPatternGc ---------------------------------------------------------
+
+pub struct StringPatternGc;
+
+impl ProgramTemplate for StringPatternGc {
+    fn name(&self) -> &'static str {
+        "string_pattern_gc"
+    }
+
+    fn generate(&self, b: &mut ProgramBuilder, generators: &[Generator], rng: &mut dyn RngCore) {
+        // String pattern matching with GC — exercises string creation/interning.
+        let lua = match rng.random_range(0..3u8) {
+            0 => {
+                "return function() \
+                local s = string.rep('abcdef', 20) \
+                local parts = {} \
+                for w in string.gmatch(s, '(%a+)') do \
+                    parts[#parts+1] = w \
+                    if #parts % 5 == 0 then collectgarbage('step') end \
+                end \
+                collectgarbage('collect') \
+                local r = string.gsub(s, '(%a)(%a)', function(a,b) \
+                    collectgarbage('step'); return b..a \
+                end) \
+            end"
+            }
+            1 => {
+                "return function() \
+                local results = {} \
+                for i=1,10 do \
+                    local s = string.rep(string.char(96+i), i*5) \
+                    local a,b = string.find(s, string.rep('.', i)) \
+                    results[i] = {a, b, s} \
+                    collectgarbage('step') \
+                end \
+                collectgarbage('collect') \
+            end"
+            }
+            _ => {
+                "return function() \
+                local s = '' \
+                for i=1,50 do s = s .. string.char(32 + (i % 95)) end \
+                local count = 0 \
+                string.gsub(s, '(.)', function(c) \
+                    count = count + 1 \
+                    if count % 10 == 0 then collectgarbage('step') end \
+                    return string.upper(c) \
+                end) \
+                collectgarbage('collect') \
+            end"
+            }
+        };
+        emit_loadstring_call(b, lua, vec![], 0);
+        fill_random(b, generators, rng);
+    }
+}
+
+// -- NestedCoroutineYield ----------------------------------------------------
+
+pub struct NestedCoroutineYield;
+
+impl ProgramTemplate for NestedCoroutineYield {
+    fn name(&self) -> &'static str {
+        "nested_coroutine_yield"
+    }
+
+    fn generate(&self, b: &mut ProgramBuilder, generators: &[Generator], rng: &mut dyn RngCore) {
+        let lua = match rng.random_range(0..3u8) {
+            0 => {
+                "return function() \
+                local function inner() \
+                    for i=1,3 do \
+                        local t = setmetatable({}, {__gc=function() collectgarbage('step') end}) \
+                        coroutine.yield(t) \
+                    end \
+                end \
+                local function outer() \
+                    local co2 = coroutine.create(inner) \
+                    for i=1,3 do \
+                        local ok, val = coroutine.resume(co2) \
+                        coroutine.yield(val) \
+                    end \
+                end \
+                local co = coroutine.create(outer) \
+                for i=1,3 do \
+                    local ok, val = coroutine.resume(co) \
+                    collectgarbage('collect') \
+                end \
+            end"
+            }
+            1 => {
+                "return function() \
+                local wrap = coroutine.wrap(function() \
+                    local t = {} \
+                    for i=1,6 do \
+                        t[i] = setmetatable({}, { \
+                            __index = function(self, k) \
+                                coroutine.yield(k) \
+                                return rawget(self, k) \
+                            end \
+                        }) \
+                    end \
+                    for i=1,6 do local _ = t[i].missing end \
+                end) \
+                for i=1,6 do \
+                    local v = wrap() \
+                    collectgarbage('step') \
+                end \
+            end"
+            }
+            _ => {
+                "return function() \
+                local co = coroutine.create(function() \
+                    local function deep(n) \
+                        if n <= 0 then coroutine.yield() return end \
+                        local t = {} \
+                        deep(n-1) \
+                        collectgarbage('step') \
+                    end \
+                    deep(8) \
+                end) \
+                coroutine.resume(co) \
+                collectgarbage('collect') \
+                coroutine.resume(co) \
+            end"
+            }
+        };
+        emit_loadstring_call(b, lua, vec![], 0);
+        fill_random(b, generators, rng);
+    }
+}
+
+// -- MathCoercionGc ----------------------------------------------------------
+
+pub struct MathCoercionGc;
+
+impl ProgramTemplate for MathCoercionGc {
+    fn name(&self) -> &'static str {
+        "math_coercion_gc"
+    }
+
+    fn generate(&self, b: &mut ProgramBuilder, generators: &[Generator], rng: &mut dyn RngCore) {
+        let lua = "return function() \
+            local vals = {'123', '45.6', '0', '-1', '1e10', '0x1A'} \
+            local ops = {} \
+            for i=1,#vals do \
+                ops[i] = tonumber(vals[i]) \
+                collectgarbage('step') \
+            end \
+            local mt = {__add=function(a,b) collectgarbage('step'); return 0 end, \
+                        __lt=function(a,b) collectgarbage('step'); return true end, \
+                        __eq=function(a,b) collectgarbage('step'); return false end} \
+            local t = setmetatable({}, mt) \
+            for i=1,#ops do \
+                pcall(function() local _ = t + ops[i] end) \
+                pcall(function() local _ = t < ops[i] end) \
+                pcall(function() local _ = math.sin(ops[i] or 0) end) \
+            end \
+            collectgarbage('collect') \
+        end";
+        emit_loadstring_call(b, lua, vec![], 0);
+        fill_random(b, generators, rng);
+    }
+}
+
 // -- Registry ----------------------------------------------------------------
 
 pub fn all_templates() -> Vec<Box<dyn ProgramTemplate>> {
@@ -494,5 +1030,14 @@ pub fn all_templates() -> Vec<Box<dyn ProgramTemplate>> {
         Box::new(CjsonMetamethod),
         Box::new(MetatableNesting),
         Box::new(UpvalueLifetime),
+        Box::new(WeakTableResurrection),
+        Box::new(UpvalueSharing),
+        Box::new(TableRehash),
+        Box::new(VarargStress),
+        Box::new(ErrorUnwindGc),
+        Box::new(DebugHookGc),
+        Box::new(StringPatternGc),
+        Box::new(NestedCoroutineYield),
+        Box::new(MathCoercionGc),
     ]
 }

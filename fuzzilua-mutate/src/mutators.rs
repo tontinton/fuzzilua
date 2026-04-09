@@ -1123,8 +1123,8 @@ impl Mutator for CoroutineYieldInjectionMutator {
         let &(fn_start, fn_end, _) = pick_random(targets, rng);
 
         // Don't inject if there's already a yield in this function body
-        let has_yield = (fn_start..fn_end)
-            .any(|i| matches!(program.instructions[i].op, Op::CoroutineYield));
+        let has_yield =
+            (fn_start..fn_end).any(|i| matches!(program.instructions[i].op, Op::CoroutineYield));
         if has_yield {
             return false;
         }
@@ -1314,9 +1314,7 @@ fn ls_change_number(lua: &str, rng: &mut dyn RngCore) -> String {
                 i += 1;
             }
             // Skip if part of an identifier
-            if start > 0
-                && (bytes[start - 1].is_ascii_alphabetic() || bytes[start - 1] == b'_')
-            {
+            if start > 0 && (bytes[start - 1].is_ascii_alphabetic() || bytes[start - 1] == b'_') {
                 continue;
             }
             numbers.push((start, i));
@@ -1383,9 +1381,7 @@ fn ls_swap_gc_mode(lua: &str, rng: &mut dyn RngCore) -> String {
 fn ls_remove_gc(lua: &str, rng: &mut dyn RngCore) -> String {
     let gc_calls: Vec<(usize, usize)> = lua
         .match_indices("collectgarbage(")
-        .filter_map(|(start, _)| {
-            lua[start..].find(')').map(|end| (start, start + end + 1))
-        })
+        .filter_map(|(start, _)| lua[start..].find(')').map(|end| (start, start + end + 1)))
         .collect();
 
     if gc_calls.is_empty() {
@@ -1405,9 +1401,7 @@ fn ls_remove_gc(lua: &str, rng: &mut dyn RngCore) -> String {
 fn ls_duplicate_gc(lua: &str, rng: &mut dyn RngCore) -> String {
     let gc_calls: Vec<(usize, usize)> = lua
         .match_indices("collectgarbage(")
-        .filter_map(|(start, _)| {
-            lua[start..].find(')').map(|end| (start, start + end + 1))
-        })
+        .filter_map(|(start, _)| lua[start..].find(')').map(|end| (start, start + end + 1)))
         .collect();
 
     if gc_calls.is_empty() {

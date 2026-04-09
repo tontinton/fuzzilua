@@ -184,6 +184,7 @@ fn run_fuzz(cli: &Cli) -> Result<()> {
         handles.push(
             thread::Builder::new()
                 .name(format!("worker-{worker_id}"))
+                .stack_size(32 * 1024 * 1024) // 32 MB — large programs can blow 8 MB default
                 .spawn(move || {
                     let mut target = match RedisTarget::spawn(redis_config) {
                         Ok(t) => t,
@@ -201,15 +202,18 @@ fn run_fuzz(cli: &Cli) -> Result<()> {
     }
 
     let mut reporter = StatsReporter::new(cli.stats_interval, cli.stats_json.clone(), jobs);
-    let mut seed_watcher = cli.seed_dir.as_ref().map(|dir| SeedWatcher::new(dir.clone()));
+    let mut seed_watcher = cli
+        .seed_dir
+        .as_ref()
+        .map(|dir| SeedWatcher::new(dir.clone()));
 
     // Plateau detection & periodic compaction state
     let mut last_edge_bits = 0u32;
     let mut stall_intervals = 0u32;
     let mut last_compact = std::time::Instant::now();
     let base_gen_ratio = cli.generation_ratio;
-    const COMPACT_INTERVAL_SECS: u64 = 300;
-    const STALL_THRESHOLD: u32 = 5; // intervals with no new edge coverage
+    const COMPACT_INTERVAL_SECS: u64 = 180;
+    const STALL_THRESHOLD: u32 = 3; // intervals with no new edge coverage
 
     while !shared.shutdown.load(Ordering::Relaxed) {
         thread::sleep(std::time::Duration::from_millis(500));
@@ -234,13 +238,12 @@ fn run_fuzz(cli: &Cli) -> Result<()> {
             } else {
                 stall_intervals += 1;
                 if stall_intervals >= STALL_THRESHOLD {
-                    let boosted = (base_gen_ratio * 3.0).min(0.8);
+                    let boosted = (base_gen_ratio * 5.0).min(0.8);
                     shared.generation_ratio.store(boosted);
                     if stall_intervals == STALL_THRESHOLD {
                         info!(
                             boosted_ratio = boosted,
-                            stall_intervals,
-                            "edge coverage stalled, boosting generation ratio"
+                            stall_intervals, "edge coverage stalled, boosting generation ratio"
                         );
                     }
                 }
@@ -316,9 +319,7 @@ fn make_redis_config(cli: &Cli, enable_alloc_fail: bool) -> Result<RedisConfig> 
     }
     .with_random_port();
 
-    if enable_alloc_fail
-        && let Some(prob) = cli.alloc_fail_prob
-    {
+    if enable_alloc_fail && let Some(prob) = cli.alloc_fail_prob {
         config
             .extra_env
             .push((ENV_ALLOC_FAIL_PROB.into(), prob.to_string()));

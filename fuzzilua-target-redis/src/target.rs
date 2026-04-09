@@ -18,7 +18,7 @@ const DEFAULT_CONSECUTIVE_TIMEOUT_THRESHOLD: u32 = 3;
 const CONNECT_BACKOFF_INITIAL: Duration = Duration::from_millis(10);
 const CONNECT_BACKOFF_MAX: Duration = Duration::from_secs(2);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
+const SHUTDOWN_GRACE: Duration = Duration::from_millis(100);
 const MAX_STDERR_LINES: usize = 10_000;
 
 #[derive(Debug, Clone)]
@@ -178,8 +178,16 @@ impl RedisTarget {
 
     fn drain_stderr(&self) -> String {
         let mut locked = self.stderr_lines.lock().unwrap();
+        if locked.is_empty() {
+            return String::new();
+        }
         let lines = std::mem::take(&mut *locked);
         lines.join("\n")
+    }
+
+    fn has_stderr(&self) -> bool {
+        let locked = self.stderr_lines.lock().unwrap();
+        !locked.is_empty()
     }
 
     fn check_sanitizer_report(&self, stderr: &str) -> Option<String> {
@@ -207,11 +215,21 @@ impl RedisTarget {
 
     /// After a failed send/recv, drain stderr and classify as crash vs connection-lost.
     fn classify_failure(&mut self, script: &str, duration: Duration) -> Execution {
+        // Give the process a moment to finish dying — if it just crashed,
+        // try_wait() may still return Ok(None) while ASan writes its report
+        // or the kernel delivers the signal. Without this, real crashes get
+        // misclassified as ConnectionLost.
+        let mut alive = self.poll_child();
+        if alive {
+            thread::sleep(Duration::from_millis(50));
+            alive = self.poll_child();
+        }
+
         let stderr = self.drain_stderr();
-        let alive = self.poll_child();
 
         if !alive {
             let signal = self.exit_signal();
+            let exit_code = self.exit_code();
             let asan_report = self.check_sanitizer_report(&stderr);
 
             if signal.is_some() || asan_report.is_some() {
@@ -224,6 +242,34 @@ impl RedisTarget {
                     stderr,
                     duration,
                 };
+            }
+
+            // Process died with a non-zero exit code but no signal/ASan.
+            // Filter out OOM noise (Lua PANIC from alloc-fail injection) —
+            // these are expected and not security bugs.
+            if let Some(code) = exit_code {
+                if code != 0 && !stderr.trim().is_empty() {
+                    if stderr.contains("not enough memory")
+                        || stderr.contains("PANIC: unprotected error")
+                    {
+                        // OOM from alloc-fail injection — not a real crash.
+                        debug!(exit_code = code, "OOM exit (filtered)");
+                    } else {
+                        // Genuine assertion failure or Redis panic — record it.
+                        tracing::warn!(exit_code = code, "redis assertion/panic (not OOM)");
+                        return Execution {
+                            status: ExecStatus::Crash(CrashInfo {
+                                signal: None,
+                                asan_report: Some(format!(
+                                    "Process exited with code {code}\n{stderr}"
+                                )),
+                                script: script.to_string(),
+                            }),
+                            stderr,
+                            duration,
+                        };
+                    }
+                }
             }
         }
 
@@ -242,6 +288,10 @@ impl RedisTarget {
         }
         #[cfg(not(unix))]
         None
+    }
+
+    fn exit_code(&self) -> Option<i32> {
+        self.exit_status.and_then(|s| s.code())
     }
 
     fn wait_for_ready(&mut self) -> Result<(), TargetError> {
@@ -292,6 +342,28 @@ impl RedisTarget {
             return;
         };
         let pid = child.id();
+
+        // Fast path: if we already reaped the process (e.g. classify_failure
+        // detected OOM death), just wait() to clean up the zombie and skip
+        // the entire SIGTERM→grace→SIGKILL dance.
+        if self.exit_status.is_some() {
+            debug!(pid, "process already dead, skipping shutdown sequence");
+            // wait() to reap zombie; ignore errors (already reaped via try_wait).
+            let _ = child.wait();
+            self.child = None;
+            self.client = None;
+            return;
+        }
+
+        // Also check if the process already exited before sending signals.
+        if let Ok(Some(status)) = child.try_wait() {
+            debug!(pid, "process already exited before SIGTERM");
+            self.exit_status = Some(status);
+            self.child = None;
+            self.client = None;
+            return;
+        }
+
         debug!(pid, "sending SIGTERM to redis");
 
         #[cfg(unix)]
@@ -347,19 +419,23 @@ impl Target for RedisTarget {
         match result {
             Ok(resp) => {
                 self.consecutive_timeouts = 0;
-                let stderr = self.drain_stderr();
-                let asan_report = self.check_sanitizer_report(&stderr);
 
-                if asan_report.is_some() {
-                    return Ok(Execution {
-                        status: ExecStatus::Crash(CrashInfo {
-                            signal: None,
-                            asan_report,
-                            script: script.to_string(),
-                        }),
-                        stderr,
-                        duration,
-                    });
+                // Fast path: skip mutex lock + allocation when stderr is empty
+                // (which is >99% of executions).
+                if self.has_stderr() {
+                    let stderr = self.drain_stderr();
+                    let asan_report = self.check_sanitizer_report(&stderr);
+                    if asan_report.is_some() {
+                        return Ok(Execution {
+                            status: ExecStatus::Crash(CrashInfo {
+                                signal: None,
+                                asan_report,
+                                script: script.to_string(),
+                            }),
+                            stderr,
+                            duration,
+                        });
+                    }
                 }
 
                 let status = match resp {
@@ -368,7 +444,7 @@ impl Target for RedisTarget {
                 };
                 Ok(Execution {
                     status,
-                    stderr,
+                    stderr: String::new(),
                     duration,
                 })
             }
@@ -399,9 +475,6 @@ impl Target for RedisTarget {
     }
 
     fn reset(&mut self) -> Result<(), TargetError> {
-        if let Some(ref mut client) = self.client {
-            let _ = client.command(&["SCRIPT", "FLUSH"]);
-        }
         self.shm.clear();
         Ok(())
     }
@@ -458,7 +531,6 @@ fn find_asan_report(lines: &[&str]) -> Option<String> {
         Some(report.join("\n"))
     }
 }
-
 
 /// Pick an available port. Inherent TOCTOU race: the port may be taken between
 /// our bind and Redis's bind. Acceptable for fuzzer workers; retry on spawn failure.

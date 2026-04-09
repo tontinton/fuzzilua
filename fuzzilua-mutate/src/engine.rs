@@ -5,9 +5,9 @@ use tracing::trace;
 use crate::mutators::{
     CallbackGcMutator, ChainDepthMutator, CodeGenMutator, CombineMutator,
     CoroutineYieldInjectionMutator, EnvironmentMutator, GcInjectionMutator, InputMutator,
-    InstructionDeleteMutator, InterleaveMutator, LoadstringContentMutator,
-    LoadstringWrapMutator, MetamethodSwapMutator, Mutator, OperationMutator, PcallWrapMutator,
-    SpliceMutator, TableSizeMutator, TypeConfusionMutator,
+    InstructionDeleteMutator, InterleaveMutator, LoadstringContentMutator, LoadstringWrapMutator,
+    MetamethodSwapMutator, Mutator, OperationMutator, PcallWrapMutator, SpliceMutator,
+    TableSizeMutator, TypeConfusionMutator,
 };
 
 const MIN_MUTATIONS_PER_ROUND: u32 = 1;

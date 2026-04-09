@@ -4,8 +4,8 @@ use rand::Rng;
 
 use crate::MutationEngine;
 
-const DEFAULT_TEMPLATE_BUDGET: usize = 100;
-const DEFAULT_TEMPLATE_DEPTH: usize = 5;
+const DEFAULT_TEMPLATE_BUDGET: usize = 200;
+const DEFAULT_TEMPLATE_DEPTH: usize = 7;
 
 pub struct HybridEngine {
     templates: Vec<Box<dyn ProgramTemplate>>,

@@ -66,7 +66,7 @@ pub fn run_worker_loop(
         }
 
         let gen_ratio = shared.generation_ratio.load();
-        let mut program = if rng.random_range(0.0..1.0) < gen_ratio {
+        let program = if rng.random_range(0.0..1.0) < gen_ratio {
             hybrid.generate(rng)
         } else {
             let corpus = shared.corpus.read().unwrap();
@@ -80,6 +80,14 @@ pub fn run_worker_loop(
                 p
             }
         };
+
+        // Cap program size to prevent unbounded growth through mutation.
+        // Very large programs slow execution and can blow the stack.
+        const MAX_INSTRUCTIONS: usize = 512;
+        if program.instructions.len() > MAX_INSTRUCTIONS {
+            shared.stats.record_exec();
+            continue;
+        }
 
         let script = lift(&program);
 
@@ -102,31 +110,32 @@ pub fn run_worker_loop(
                 true
             }
             ExecStatus::Ok | ExecStatus::RuntimeError(_) => {
-                let mut coverage = target.collect_coverage();
-                coverage.classify_counts();
+                let coverage = target.collect_coverage();
 
-                if shared.coverage.has_new_bits(&coverage) {
-                    if config.minimize {
-                        program = minimize(&program, target);
-                        let script = lift(&program);
+                // Strict merge: only 0→nonzero byte transitions count as
+                // novel. Prevents corpus bloat from hit-count bucket noise.
+                if shared.coverage.merge_if_new_edge_strict(&coverage) {
+                    let (program, coverage) = if config.minimize {
+                        let min_prog = minimize(&program, target);
+                        let script = lift(&min_prog);
                         if target.execute(&script).is_ok() {
-                            coverage = target.collect_coverage();
-                            coverage.classify_counts();
+                            let min_cov = target.collect_coverage();
+                            let _ = target.reset();
+                            (min_prog, min_cov)
+                        } else {
+                            let _ = target.reset();
+                            (program, coverage)
                         }
-                        let _ = target.reset();
-                    }
-                    // Only add to corpus for truly new edges (0→nonzero byte).
-                    // Ignores hit-count bucket changes on known edges and
-                    // GC bits — both cause massive corpus bloat.
-                    if shared.coverage.merge_if_new_edge_strict(&coverage) {
-                        let mut corpus = shared.corpus.write().unwrap();
-                        corpus.add_unchecked(program, coverage);
-                        debug!(
-                            worker = config.worker_id,
-                            corpus_size = corpus.len(),
-                            "new edge coverage found"
-                        );
-                    }
+                    } else {
+                        (program, coverage)
+                    };
+                    let mut corpus = shared.corpus.write().unwrap();
+                    corpus.add_unchecked(program, coverage);
+                    debug!(
+                        worker = config.worker_id,
+                        corpus_size = corpus.len(),
+                        "new edge coverage found"
+                    );
                 }
                 false
             }

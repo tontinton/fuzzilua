@@ -492,7 +492,9 @@ fn gen_newproxy_finalizer(b: &mut ProgramBuilder, rng: &mut dyn RngCore) -> Opti
         0 => "collectgarbage('collect') collectgarbage('collect')",
         1 => "collectgarbage('step') for j=1,10 do local t={} end",
         2 => "collectgarbage('collect') local s=string.rep('x',1000)",
-        3 => "collectgarbage('step') collectgarbage('collect') local t=setmetatable({},{__index=function() return 0 end})",
+        3 => {
+            "collectgarbage('step') collectgarbage('collect') local t=setmetatable({},{__index=function() return 0 end})"
+        }
         _ => "for j=1,5 do local t={} t[j]=string.rep('a',j*100) end collectgarbage('step')",
     };
     let lua = format!(
@@ -532,7 +534,7 @@ fn gen_finalizer_resurrection(b: &mut ProgramBuilder, rng: &mut dyn RngCore) -> 
                 collectgarbage('collect') \
                 for i,v in ipairs(alive) do end \
             end"
-                .to_string()
+            .to_string()
         }
         1 => {
             // Chain of finalizers referencing each other
@@ -552,7 +554,7 @@ fn gen_finalizer_resurrection(b: &mut ProgramBuilder, rng: &mut dyn RngCore) -> 
                 collectgarbage('collect') \
                 collectgarbage('collect') \
             end"
-                .to_string()
+            .to_string()
         }
         _ => {
             // Finalizer that triggers error + GC
@@ -567,7 +569,7 @@ fn gen_finalizer_resurrection(b: &mut ProgramBuilder, rng: &mut dyn RngCore) -> 
                 collectgarbage('collect') \
                 collectgarbage('collect') \
             end"
-                .to_string()
+            .to_string()
         }
     };
     emit_loadstring_call(b, &pattern, vec![], 0)?;
@@ -592,7 +594,7 @@ fn gen_yield_in_callback(b: &mut ProgramBuilder, rng: &mut dyn RngCore) -> Optio
                     collectgarbage('step') \
                 end \
             end"
-                .to_string()
+            .to_string()
         }
         1 => {
             // Yield in __index metamethod inside coroutine
@@ -614,7 +616,7 @@ fn gen_yield_in_callback(b: &mut ProgramBuilder, rng: &mut dyn RngCore) -> Optio
                     if not ok then break end \
                 end \
             end"
-                .to_string()
+            .to_string()
         }
         2 => {
             // Yield in __newindex + GC pressure
@@ -634,7 +636,7 @@ fn gen_yield_in_callback(b: &mut ProgramBuilder, rng: &mut dyn RngCore) -> Optio
                     if not ok then break end \
                 end \
             end"
-                .to_string()
+            .to_string()
         }
         _ => {
             // Yield in __tostring during error formatting
@@ -656,7 +658,7 @@ fn gen_yield_in_callback(b: &mut ProgramBuilder, rng: &mut dyn RngCore) -> Optio
                     collectgarbage('step') \
                 end \
             end"
-                .to_string()
+            .to_string()
         }
     };
     emit_loadstring_call(b, &pattern, vec![], 0)?;
@@ -682,7 +684,7 @@ fn gen_weak_finalizer_interaction(b: &mut ProgramBuilder, rng: &mut dyn RngCore)
                 collectgarbage('collect') \
                 collectgarbage('collect') \
             end"
-                .to_string()
+            .to_string()
         }
         _ => {
             // Modify weak table during GC sweep via finalizer
@@ -703,7 +705,7 @@ fn gen_weak_finalizer_interaction(b: &mut ProgramBuilder, rng: &mut dyn RngCore)
                 collectgarbage('collect') \
                 for k,v in pairs(weak) do end \
             end"
-                .to_string()
+            .to_string()
         }
     };
     emit_loadstring_call(b, &pattern, vec![], 0)?;

@@ -81,8 +81,7 @@ impl Corpus {
     pub fn select_and_track(&mut self, rng: &mut impl Rng) -> Program {
         assert!(!self.entries.is_empty(), "cannot select from empty corpus");
         let idx = self.scheduler.select(&self.entries, rng);
-        self.entries[idx].mutation_count =
-            self.entries[idx].mutation_count.saturating_add(1);
+        self.entries[idx].mutation_count = self.entries[idx].mutation_count.saturating_add(1);
         self.entries[idx].program.clone()
     }
 
@@ -149,13 +148,20 @@ impl Corpus {
     }
 
     /// Apply a pre-computed eviction mask (from `compute_eviction`).
+    /// The mask may be stale if workers added entries between snapshot and
+    /// eviction — in that case we only apply to the prefix we have data for.
     pub fn apply_eviction(&mut self, keep: &[bool]) {
         let before = self.entries.len();
-        assert_eq!(keep.len(), before);
+        let keep_len = keep.len();
+        if keep_len > before {
+            // Corpus shrank (shouldn't happen), bail out.
+            return;
+        }
 
         let mut idx = 0;
         self.entries.retain(|_| {
-            let k = keep[idx];
+            // Entries added after the snapshot are always kept.
+            let k = if idx < keep_len { keep[idx] } else { true };
             idx += 1;
             k
         });
