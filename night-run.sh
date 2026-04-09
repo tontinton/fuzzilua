@@ -5,7 +5,8 @@ set -euo pipefail
 # night-run.sh - Launch fuzzer + periodic maki overseer
 #
 # Usage:
-#   ./night-run.sh                  # start fuzzer + overseer loop
+#   ./night-run.sh                  # start fuzzer only (no overseer)
+#   ./night-run.sh --overseer       # start fuzzer + overseer loop
 #   ./night-run.sh --overseer-only  # attach overseer to already-running fuzzer
 #   ./night-run.sh --stop           # gracefully stop everything
 #
@@ -111,13 +112,18 @@ if [[ "${1:-}" == "--stop" ]]; then
 fi
 
 OVERSEER_ONLY=false
-if [[ "${1:-}" == "--overseer-only" ]]; then
-    OVERSEER_ONLY=true
-fi
+OVERSEER_ENABLED=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --overseer-only) OVERSEER_ONLY=true; OVERSEER_ENABLED=true; shift ;;
+        --overseer)      OVERSEER_ENABLED=true; shift ;;
+        *)               echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+done
 
 # --- Preflight checks ---
 [[ -f "$REDIS_BIN" ]] || die "Redis binary not found: $REDIS_BIN (set REDIS_BIN env var)"
-command -v maki >/dev/null || die "maki not found in PATH"
+[[ "$OVERSEER_ENABLED" == true ]] && { command -v maki >/dev/null || die "maki not found in PATH"; }
 command -v cargo >/dev/null || die "cargo not found in PATH"
 
 mkdir -p "$NIGHT_DIR" "$RUNS_DIR" "$CORPUS_DIR"
@@ -175,13 +181,14 @@ if [[ "$OVERSEER_ONLY" == false ]]; then
     fi
 fi
 
-# --- Overseer loop ---
+# --- Wait loop ---
 trap cleanup EXIT INT TERM
-
-echo $$ > "$OVERSEER_PID_FILE"
 
 START_TS=$(date +%s)
 MAX_SECS=$((MAX_HOURS * 3600))
+
+if [[ "$OVERSEER_ENABLED" == true ]]; then
+echo $$ > "$OVERSEER_PID_FILE"
 RUN_NUM=0
 
 log "Overseer started. Checking every ${CHECK_INTERVAL}s for up to ${MAX_HOURS}h."
@@ -197,6 +204,7 @@ while true; do
     fi
 
     sleep "$CHECK_INTERVAL" &
+    wait $! 2>/dev/null || true &
     wait $! 2>/dev/null || true
 
     FUZZER_ALIVE=true
@@ -332,3 +340,24 @@ RUN_EOF
 done
 
 log "Night run finished after $RUN_NUM checks."
+else
+    # No overseer — just wait for fuzzer or max runtime
+    log "Fuzzer running (no overseer). Max runtime: ${MAX_HOURS}h. Ctrl-C to stop."
+
+    while true; do
+        NOW_TS=$(date +%s)
+        ELAPSED=$(( NOW_TS - START_TS ))
+        if (( ELAPSED >= MAX_SECS )); then
+            log "Max runtime (${MAX_HOURS}h) reached. Shutting down."
+            break
+        fi
+
+        if [[ -f "$FUZZER_PID_FILE" ]] && ! kill -0 "$(cat "$FUZZER_PID_FILE")" 2>/dev/null; then
+            log "Fuzzer exited."
+            break
+        fi
+
+        sleep 30 &
+        wait $! 2>/dev/null || true
+    done
+fi
