@@ -17,11 +17,16 @@ pub struct WeightedScheduler;
 
 impl CorpusScheduler for WeightedScheduler {
     fn select(&self, entries: &[CorpusEntry], rng: &mut dyn RngCore) -> usize {
+        let n = entries.len().max(1) as f64;
         let weights: Vec<f64> = entries
             .iter()
-            .map(|e| {
+            .enumerate()
+            .map(|(i, e)| {
                 let unique = e.cached_nonzero as f64;
-                unique / (1.0 + e.mutation_count as f64)
+                // Recency bias: newer entries (higher index) get up to 2x weight.
+                // This favors less-explored entries since mutation_count is not tracked at runtime.
+                let recency = 1.0 + (i as f64 / n);
+                unique * recency / (1.0 + e.mutation_count as f64)
             })
             .collect();
         weighted_select(&weights, rng)

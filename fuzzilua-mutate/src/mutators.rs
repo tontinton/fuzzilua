@@ -1165,6 +1165,273 @@ impl Mutator for CoroutineYieldInjectionMutator {
     }
 }
 
+// ---------------------------------------------------------------------------
+// LoadstringContentMutator — mutates Lua source inside loadstring() calls
+// ---------------------------------------------------------------------------
+
+pub struct LoadstringContentMutator;
+
+impl Mutator for LoadstringContentMutator {
+    fn name(&self) -> &'static str {
+        "LoadstringContentMutator"
+    }
+
+    fn mutate(&self, program: &mut Program, rng: &mut dyn RngCore) -> bool {
+        // Find variables that feed into Loadstring instructions
+        let loadstring_inputs: Vec<Variable> = program
+            .instructions
+            .iter()
+            .filter(|instr| matches!(instr.op, Op::Loadstring))
+            .filter_map(|instr| instr.inputs.first().copied())
+            .collect();
+
+        if loadstring_inputs.is_empty() {
+            return false;
+        }
+
+        // Find LoadString instructions that produce those variables (i.e., embedded Lua code)
+        let candidates: Vec<usize> = program
+            .instructions
+            .iter()
+            .enumerate()
+            .filter(|(_, instr)| {
+                matches!(&instr.op, Op::LoadString(s) if s.len() > 20)
+                    && instr
+                        .outputs
+                        .first()
+                        .is_some_and(|v| loadstring_inputs.contains(v))
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        if candidates.is_empty() {
+            return false;
+        }
+
+        let idx = candidates[rng.random_range(0..candidates.len())];
+        let Op::LoadString(ref s) = program.instructions[idx].op else {
+            return false;
+        };
+
+        let lua = s.to_string();
+        let mutated = match rng.random_range(0..8u8) {
+            0 | 1 => ls_insert_gc(&lua, rng),
+            2 => ls_change_number(&lua, rng),
+            3 => ls_insert_alloc(&lua, rng),
+            4 => ls_swap_gc_mode(&lua, rng),
+            5 => ls_remove_gc(&lua, rng),
+            6 => ls_duplicate_gc(&lua, rng),
+            _ => ls_insert_yield(&lua, rng),
+        };
+
+        if mutated == lua || mutated.is_empty() {
+            return false;
+        }
+
+        program.instructions[idx].op = Op::LoadString(mutated.into());
+        true
+    }
+}
+
+/// Find positions in embedded Lua source where a standalone statement can be inserted.
+fn ls_find_insertion_points(lua: &str) -> Vec<usize> {
+    let mut points = Vec::new();
+    let bytes = lua.as_bytes();
+
+    // After "end " preceded by non-alphanumeric (keyword boundary)
+    for (i, _) in lua.match_indices("end ") {
+        if i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_') {
+            points.push(i + 4);
+        }
+    }
+    // After "do " preceded by space
+    for (i, _) in lua.match_indices("do ") {
+        if i > 0 && bytes[i - 1] == b' ' {
+            points.push(i + 3);
+        }
+    }
+    // After "then "
+    for (i, _) in lua.match_indices("then ") {
+        if i == 0 || !bytes[i - 1].is_ascii_alphanumeric() {
+            points.push(i + 5);
+        }
+    }
+
+    // Fallback: before a trailing "end"
+    if points.is_empty() {
+        if let Some(pos) = lua.rfind(" end") {
+            points.push(pos + 1);
+        }
+    }
+
+    points.sort();
+    points.dedup();
+    points
+}
+
+fn ls_insert_gc(lua: &str, rng: &mut dyn RngCore) -> String {
+    let points = ls_find_insertion_points(lua);
+    if points.is_empty() {
+        return lua.to_string();
+    }
+    let pos = points[rng.random_range(0..points.len())];
+    let gc = if rng.random_bool(0.5) {
+        "collectgarbage('collect') "
+    } else {
+        "collectgarbage('step') "
+    };
+    format!("{}{}{}", &lua[..pos], gc, &lua[pos..])
+}
+
+fn ls_insert_alloc(lua: &str, rng: &mut dyn RngCore) -> String {
+    let points = ls_find_insertion_points(lua);
+    if points.is_empty() {
+        return lua.to_string();
+    }
+    let pos = points[rng.random_range(0..points.len())];
+    let snippet = match rng.random_range(0..3u8) {
+        0 => {
+            let n = rng.random_range(1..=20);
+            format!("for __i=1,{n} do local __t={{}} end ")
+        }
+        1 => {
+            let n = rng.random_range(10..=1000);
+            format!("local __s=string.rep('x',{n}) ")
+        }
+        _ => "local __t={} ".to_string(),
+    };
+    format!("{}{}{}", &lua[..pos], snippet, &lua[pos..])
+}
+
+fn ls_change_number(lua: &str, rng: &mut dyn RngCore) -> String {
+    let bytes = lua.as_bytes();
+    let mut numbers: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            // Skip if part of an identifier
+            if start > 0
+                && (bytes[start - 1].is_ascii_alphabetic() || bytes[start - 1] == b'_')
+            {
+                continue;
+            }
+            numbers.push((start, i));
+        } else {
+            i += 1;
+        }
+    }
+
+    if numbers.is_empty() {
+        return lua.to_string();
+    }
+
+    let (start, end) = numbers[rng.random_range(0..numbers.len())];
+    let old_num: i64 = lua[start..end].parse().unwrap_or(0);
+
+    let new_num = match rng.random_range(0..6u8) {
+        0 => old_num.saturating_add(1),
+        1 => old_num.saturating_sub(1).max(0),
+        2 => old_num.saturating_mul(2),
+        3 => 0,
+        4 => 1,
+        _ => {
+            let boundaries: &[i64] = &[0, 1, 2, 3, 7, 8, 15, 16, 31, 32, 100, 1000];
+            boundaries[rng.random_range(0..boundaries.len())]
+        }
+    };
+
+    format!("{}{}{}", &lua[..start], new_num, &lua[end..])
+}
+
+fn ls_swap_gc_mode(lua: &str, rng: &mut dyn RngCore) -> String {
+    let collects: Vec<usize> = lua
+        .match_indices("collectgarbage('collect')")
+        .map(|(i, _)| i)
+        .collect();
+    let steps: Vec<usize> = lua
+        .match_indices("collectgarbage('step')")
+        .map(|(i, _)| i)
+        .collect();
+
+    let all: Vec<(usize, bool)> = collects
+        .iter()
+        .map(|&i| (i, true))
+        .chain(steps.iter().map(|&i| (i, false)))
+        .collect();
+
+    if all.is_empty() {
+        return lua.to_string();
+    }
+
+    let &(pos, is_collect) = &all[rng.random_range(0..all.len())];
+
+    if is_collect {
+        let old = "collectgarbage('collect')";
+        let new_call = "collectgarbage('step')";
+        format!("{}{}{}", &lua[..pos], new_call, &lua[pos + old.len()..])
+    } else {
+        let old = "collectgarbage('step')";
+        let new_call = "collectgarbage('collect')";
+        format!("{}{}{}", &lua[..pos], new_call, &lua[pos + old.len()..])
+    }
+}
+
+fn ls_remove_gc(lua: &str, rng: &mut dyn RngCore) -> String {
+    let gc_calls: Vec<(usize, usize)> = lua
+        .match_indices("collectgarbage(")
+        .filter_map(|(start, _)| {
+            lua[start..].find(')').map(|end| (start, start + end + 1))
+        })
+        .collect();
+
+    if gc_calls.is_empty() {
+        return lua.to_string();
+    }
+
+    let (start, end) = gc_calls[rng.random_range(0..gc_calls.len())];
+    // Also consume trailing space
+    let end = if end < lua.len() && lua.as_bytes()[end] == b' ' {
+        end + 1
+    } else {
+        end
+    };
+    format!("{}{}", &lua[..start], &lua[end..])
+}
+
+fn ls_duplicate_gc(lua: &str, rng: &mut dyn RngCore) -> String {
+    let gc_calls: Vec<(usize, usize)> = lua
+        .match_indices("collectgarbage(")
+        .filter_map(|(start, _)| {
+            lua[start..].find(')').map(|end| (start, start + end + 1))
+        })
+        .collect();
+
+    if gc_calls.is_empty() {
+        return lua.to_string();
+    }
+
+    let (start, end) = gc_calls[rng.random_range(0..gc_calls.len())];
+    let call = lua[start..end].to_string();
+    format!("{} {}{}", &lua[..end], call, &lua[end..])
+}
+
+fn ls_insert_yield(lua: &str, rng: &mut dyn RngCore) -> String {
+    let points = ls_find_insertion_points(lua);
+    if points.is_empty() {
+        return lua.to_string();
+    }
+    let pos = points[rng.random_range(0..points.len())];
+    format!("{}coroutine.yield() {}", &lua[..pos], &lua[pos..])
+}
+
+// ---------------------------------------------------------------------------
+// EnvironmentMutator
+// ---------------------------------------------------------------------------
+
 pub struct EnvironmentMutator;
 
 impl Mutator for EnvironmentMutator {

@@ -60,13 +60,19 @@ impl StatsReporter {
         }
     }
 
-    pub fn maybe_display(&mut self, stats: &AtomicStats, corpus: &Corpus, unique_crashes: usize) {
+    pub fn maybe_display(
+        &mut self,
+        stats: &AtomicStats,
+        corpus: &Corpus,
+        unique_crashes: usize,
+    ) -> bool {
         let now = Instant::now();
         if now.duration_since(self.last_display) < self.display_interval {
-            return;
+            return false;
         }
         self.last_display = now;
         self.display(stats, corpus, unique_crashes);
+        true
     }
 
     pub fn display(&mut self, stats: &AtomicStats, corpus: &Corpus, unique_crashes: usize) {

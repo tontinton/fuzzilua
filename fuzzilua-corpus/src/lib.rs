@@ -76,6 +76,16 @@ impl Corpus {
         &self.entries[idx]
     }
 
+    /// Select an entry, increment its mutation count, and return a clone of its program.
+    /// Requires `&mut self` — callers should use a write lock.
+    pub fn select_and_track(&mut self, rng: &mut impl Rng) -> Program {
+        assert!(!self.entries.is_empty(), "cannot select from empty corpus");
+        let idx = self.scheduler.select(&self.entries, rng);
+        self.entries[idx].mutation_count =
+            self.entries[idx].mutation_count.saturating_add(1);
+        self.entries[idx].program.clone()
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -128,6 +138,35 @@ impl Corpus {
             warn!("failed to persist blind corpus entry: {e}");
         }
         self.entries.push(entry);
+    }
+
+    /// Snapshot coverage data for non-blocking compaction.
+    pub fn snapshot_coverage(&self) -> Vec<(u32, CoverageBitmap)> {
+        self.entries
+            .iter()
+            .map(|e| (e.cached_nonzero, e.coverage.clone()))
+            .collect()
+    }
+
+    /// Apply a pre-computed eviction mask (from `compute_eviction`).
+    pub fn apply_eviction(&mut self, keep: &[bool]) {
+        let before = self.entries.len();
+        assert_eq!(keep.len(), before);
+
+        let mut idx = 0;
+        self.entries.retain(|_| {
+            let k = keep[idx];
+            idx += 1;
+            k
+        });
+
+        let evicted = before - self.entries.len();
+        if evicted > 0 {
+            if let Err(e) = self.re_persist() {
+                warn!("failed to re-persist corpus after compaction: {e}");
+            }
+            info!(evicted, remaining = self.entries.len(), "corpus compacted");
+        }
     }
 
     pub fn compact(&mut self) {
@@ -210,6 +249,36 @@ impl Corpus {
         }
         Ok(())
     }
+}
+
+/// Compute which entries to keep based on coverage subset relationships.
+/// Runs without holding any lock — safe to call on a snapshot.
+pub fn compute_eviction(snapshots: &[(u32, CoverageBitmap)]) -> Vec<bool> {
+    let n = snapshots.len();
+    let mut keep = vec![true; n];
+
+    for i in 0..n {
+        if !keep[i] {
+            continue;
+        }
+        let (nz_i, ref cov_i) = snapshots[i];
+        for j in (i + 1)..n {
+            if !keep[j] {
+                continue;
+            }
+            let (nz_j, ref cov_j) = snapshots[j];
+            let j_sub_i = nz_j <= nz_i && cov_j.is_subset_of(cov_i);
+            let i_sub_j = nz_i <= nz_j && cov_i.is_subset_of(cov_j);
+            if j_sub_i && !i_sub_j {
+                keep[j] = false;
+            } else if i_sub_j && !j_sub_i {
+                keep[i] = false;
+                break;
+            }
+        }
+    }
+
+    keep
 }
 
 #[cfg(test)]

@@ -241,6 +241,7 @@ fn crash_detection_with_mock_target() {
         crash_db: Mutex::new(CrashDb::new()),
         stats: AtomicStats::new(),
         shutdown: Arc::new(AtomicBool::new(false)),
+        generation_ratio: fuzzilua_cli::AtomicF64::new(0.0),
     };
 
     run_worker_loop(
@@ -251,7 +252,6 @@ fn crash_detection_with_mock_target() {
             max_iters: Some(5),
             crash_dir: crash_dir.clone(),
             minimize: false,
-            generation_ratio: 0.0,
             worker_id: 0,
         },
         &mut rng,
@@ -283,6 +283,7 @@ fn lock_contention_corpus_correctness() {
         crash_db: Mutex::new(CrashDb::new()),
         stats: AtomicStats::new(),
         shutdown: Arc::new(AtomicBool::new(false)),
+        generation_ratio: fuzzilua_cli::AtomicF64::new(0.3),
     });
 
     {

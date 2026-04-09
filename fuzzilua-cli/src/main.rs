@@ -8,8 +8,8 @@ use std::thread;
 use clap::Parser;
 use color_eyre::eyre::{Result, bail};
 use fuzzilua_cli::{
-    AtomicStats, CrashDb, SharedState, StatsReporter, WorkerConfig, reproduce, run_worker_loop,
-    seed,
+    AtomicF64, AtomicStats, CrashDb, SharedState, StatsReporter, WorkerConfig, reproduce,
+    run_worker_loop, seed,
 };
 use fuzzilua_corpus::{Corpus, WeightedScheduler};
 use fuzzilua_coverage::AtomicBitmap;
@@ -153,6 +153,7 @@ fn run_fuzz(cli: &Cli) -> Result<()> {
         crash_db: Mutex::new(CrashDb::new()),
         stats: AtomicStats::new(),
         shutdown,
+        generation_ratio: AtomicF64::new(cli.generation_ratio),
     });
 
     {
@@ -177,7 +178,6 @@ fn run_fuzz(cli: &Cli) -> Result<()> {
             max_iters: cli.max_iters,
             crash_dir: crash_dir.clone(),
             minimize: !cli.no_minimize,
-            generation_ratio: cli.generation_ratio,
             worker_id,
         };
 
@@ -203,6 +203,14 @@ fn run_fuzz(cli: &Cli) -> Result<()> {
     let mut reporter = StatsReporter::new(cli.stats_interval, cli.stats_json.clone(), jobs);
     let mut seed_watcher = cli.seed_dir.as_ref().map(|dir| SeedWatcher::new(dir.clone()));
 
+    // Plateau detection & periodic compaction state
+    let mut last_edge_bits = 0u32;
+    let mut stall_intervals = 0u32;
+    let mut last_compact = std::time::Instant::now();
+    let base_gen_ratio = cli.generation_ratio;
+    const COMPACT_INTERVAL_SECS: u64 = 300;
+    const STALL_THRESHOLD: u32 = 5; // intervals with no new edge coverage
+
     while !shared.shutdown.load(Ordering::Relaxed) {
         thread::sleep(std::time::Duration::from_millis(500));
 
@@ -212,7 +220,57 @@ fn run_fuzz(cli: &Cli) -> Result<()> {
 
         let corpus = shared.corpus.read().unwrap();
         let unique_crashes = shared.crash_db.lock().unwrap().unique_count();
-        reporter.maybe_display(&shared.stats, &corpus, unique_crashes);
+        let displayed = reporter.maybe_display(&shared.stats, &corpus, unique_crashes);
+        let (edge_bits, _gc_bits) = corpus.total_coverage();
+        let corpus_size = corpus.len();
+        drop(corpus);
+
+        // --- Plateau detection: boost generation ratio when edge coverage stalls ---
+        if displayed {
+            if edge_bits > last_edge_bits {
+                last_edge_bits = edge_bits;
+                stall_intervals = 0;
+                shared.generation_ratio.store(base_gen_ratio);
+            } else {
+                stall_intervals += 1;
+                if stall_intervals >= STALL_THRESHOLD {
+                    let boosted = (base_gen_ratio * 3.0).min(0.8);
+                    shared.generation_ratio.store(boosted);
+                    if stall_intervals == STALL_THRESHOLD {
+                        info!(
+                            boosted_ratio = boosted,
+                            stall_intervals,
+                            "edge coverage stalled, boosting generation ratio"
+                        );
+                    }
+                }
+            }
+        }
+
+        // --- Periodic corpus compaction (non-blocking) ---
+        // Snapshot coverage bitmaps under a read lock, compute eviction set
+        // without any lock, then apply under a brief write lock.
+        if last_compact.elapsed().as_secs() >= COMPACT_INTERVAL_SECS && corpus_size > 500 {
+            last_compact = std::time::Instant::now();
+            let shared_clone = Arc::clone(&shared);
+            thread::spawn(move || {
+                // Phase 1: snapshot coverage under read lock
+                let snapshots: Vec<(u32, fuzzilua_coverage::CoverageBitmap)> = {
+                    let corpus = shared_clone.corpus.read().unwrap();
+                    corpus.snapshot_coverage()
+                };
+
+                // Phase 2: compute eviction set (no lock held)
+                let keep = fuzzilua_corpus::compute_eviction(&snapshots);
+
+                // Phase 3: apply under brief write lock
+                let evictable: usize = keep.iter().filter(|&&k| !k).count();
+                if evictable > 0 {
+                    let mut corpus = shared_clone.corpus.write().unwrap();
+                    corpus.apply_eviction(&keep);
+                }
+            });
+        }
 
         if cli
             .max_iters

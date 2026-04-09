@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use fuzzilua_corpus::{Corpus, minimize};
@@ -13,19 +13,34 @@ use tracing::{debug, error, warn};
 use crate::crash::{CrashDb, build_crash_report, crash_hash};
 use crate::stats::AtomicStats;
 
+/// Atomic f64 via bit-cast to u64.
+pub struct AtomicF64(AtomicU64);
+
+impl AtomicF64 {
+    pub fn new(val: f64) -> Self {
+        Self(AtomicU64::new(val.to_bits()))
+    }
+    pub fn load(&self) -> f64 {
+        f64::from_bits(self.0.load(Ordering::Relaxed))
+    }
+    pub fn store(&self, val: f64) {
+        self.0.store(val.to_bits(), Ordering::Relaxed);
+    }
+}
+
 pub struct SharedState {
     pub corpus: RwLock<Corpus>,
     pub coverage: AtomicBitmap,
     pub crash_db: Mutex<CrashDb>,
     pub stats: AtomicStats,
     pub shutdown: Arc<AtomicBool>,
+    pub generation_ratio: AtomicF64,
 }
 
 pub struct WorkerConfig {
     pub max_iters: Option<u64>,
     pub crash_dir: std::path::PathBuf,
     pub minimize: bool,
-    pub generation_ratio: f64,
     pub worker_id: u32,
 }
 
@@ -50,15 +65,19 @@ pub fn run_worker_loop(
             break;
         }
 
-        let mut program = {
+        let gen_ratio = shared.generation_ratio.load();
+        let mut program = if rng.random_range(0.0..1.0) < gen_ratio {
+            hybrid.generate(rng)
+        } else {
             let corpus = shared.corpus.read().unwrap();
-            if !corpus.is_empty() && rng.random_range(0.0..1.0) >= config.generation_ratio {
-                let entry = corpus.select(rng);
-                let mut p = entry.program.clone();
+            if corpus.is_empty() {
+                drop(corpus);
+                hybrid.generate(rng)
+            } else {
+                let mut p = corpus.select(rng).program.clone();
+                drop(corpus);
                 engine.mutate(&mut p, rng);
                 p
-            } else {
-                hybrid.generate(rng)
             }
         };
 
@@ -96,13 +115,16 @@ pub fn run_worker_loop(
                         }
                         let _ = target.reset();
                     }
-                    if shared.coverage.merge_if_new(&coverage) {
+                    // Only add to corpus for truly new edges (0→nonzero byte).
+                    // Ignores hit-count bucket changes on known edges and
+                    // GC bits — both cause massive corpus bloat.
+                    if shared.coverage.merge_if_new_edge_strict(&coverage) {
                         let mut corpus = shared.corpus.write().unwrap();
                         corpus.add_unchecked(program, coverage);
                         debug!(
                             worker = config.worker_id,
                             corpus_size = corpus.len(),
-                            "new coverage found"
+                            "new edge coverage found"
                         );
                     }
                 }

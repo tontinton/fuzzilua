@@ -5,5 +5,5 @@ pub mod seed;
 pub mod stats;
 
 pub use crash::CrashDb;
-pub use fuzzer::{SharedState, WorkerConfig, run_worker_loop};
+pub use fuzzer::{AtomicF64, SharedState, WorkerConfig, run_worker_loop};
 pub use stats::{AtomicStats, StatsReporter};

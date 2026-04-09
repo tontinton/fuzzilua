@@ -42,6 +42,27 @@ impl AtomicBitmap {
         new_edge || new_gc
     }
 
+    /// Merge all bits and return whether new *edge* bits were found.
+    /// GC bits are always merged (for tracking) but only new edge coverage
+    /// triggers corpus growth — this prevents GC-timing noise from bloating
+    /// the corpus.
+    pub fn merge_if_new_edge(&self, local: &CoverageBitmap) -> bool {
+        let new_edge = merge_if_new_atomic(local.edge_bytes(), self.edge_atoms());
+        // Always merge GC bits for tracking, but don't let them drive corpus growth.
+        merge_atomic(local.gc_bytes(), self.gc_atoms());
+        new_edge
+    }
+
+    /// Like `merge_if_new_edge`, but only considers a truly new edge
+    /// (byte going from 0→nonzero) as novel — ignores hit-count bucket
+    /// changes on already-known edges. This prevents corpus bloat from
+    /// the same edges being hit with slightly different iteration counts.
+    pub fn merge_if_new_edge_strict(&self, local: &CoverageBitmap) -> bool {
+        let new_edge = merge_new_edge_strict(local.edge_bytes(), self.edge_atoms());
+        merge_atomic(local.gc_bytes(), self.gc_atoms());
+        new_edge
+    }
+
     pub fn snapshot(&self) -> CoverageBitmap {
         let bytes: Vec<u8> = self.buf.iter().map(|a| a.load(Ordering::Relaxed)).collect();
         CoverageBitmap::from_raw(bytes, self.edge_len)
@@ -69,6 +90,27 @@ fn merge_atomic(src: &[u8], dst: &[AtomicU8]) {
             d.fetch_or(*s, Ordering::Relaxed);
         }
     }
+}
+
+/// Merge src into dst, returning true only if any byte transitioned from
+/// 0 → nonzero. Ignores new bits added to already-nonzero bytes (i.e.
+/// hit-count bucket changes on known edges). All bits are still merged.
+fn merge_new_edge_strict(src: &[u8], dst: &[AtomicU8]) -> bool {
+    assert_eq!(
+        src.len(),
+        dst.len(),
+        "bitmap size mismatch in merge_new_edge_strict"
+    );
+    let mut found_new = false;
+    for (s, d) in src.iter().zip(dst.iter()) {
+        if *s != 0 {
+            let old = d.fetch_or(*s, Ordering::Relaxed);
+            if old == 0 {
+                found_new = true;
+            }
+        }
+    }
+    found_new
 }
 
 /// Merge src into dst, returning true if any genuinely new bits were set.
