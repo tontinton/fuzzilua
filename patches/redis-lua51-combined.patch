@@ -1,5 +1,5 @@
 diff --git a/deps/lua/src/lgc.c b/deps/lua/src/lgc.c
-index e909c79a9696..e4aae86d1461 100644
+index e909c79a9696..76797d43f2be 100644
 --- a/deps/lua/src/lgc.c
 +++ b/deps/lua/src/lgc.c
 @@ -6,6 +6,11 @@
@@ -254,7 +254,27 @@ index e909c79a9696..e4aae86d1461 100644
        *p = curr->gch.next;
        if (curr == g->rootgc)  /* is the first element of the list? */
          g->rootgc = curr->gch.next;  /* adjust first */
-@@ -663,11 +841,32 @@ void luaC_barrierf (lua_State *L, GCObject *o, GCObject *v) {
+@@ -610,6 +788,19 @@ static l_mem singlestep (lua_State *L) {
+ void luaC_step (lua_State *L) {
+   global_State *g = G(L);
+   l_mem lim = (GCSTEPSIZE/100) * g->gcstepmul;
++#ifdef FUZZILUA_GC_ASSERT
++  /* Periodic full-walk invariant check at a safe point. Unlike
++   * fuzzilua_gc_stress_hook (which fires inside luaM_realloc_ while
++   * caller pointers may still be stale), we are outside any allocation
++   * here, so every Proto->k / closure upval / etc. is consistent. The
++   * check early-exits unless gcstate == GCSpropagate. */
++  { static unsigned int fuzzilua_step_check_counter = 0;
++    if (++fuzzilua_step_check_counter >= 64) {
++      fuzzilua_step_check_counter = 0;
++      fuzzilua_gc_check_invariants(g);
++    }
++  }
++#endif
+   if (lim == 0)
+     lim = (MAX_LUMEM-1)/2;  /* no limit */
+   g->gcdept += g->totalbytes - g->GCthreshold;
+@@ -663,11 +854,32 @@ void luaC_barrierf (lua_State *L, GCObject *o, GCObject *v) {
    lua_assert(isblack(o) && iswhite(v) && !isdead(g, v) && !isdead(g, o));
    lua_assert(g->gcstate != GCSfinalize && g->gcstate != GCSpause);
    lua_assert(ttype(&o->gch) != LUA_TTABLE);
@@ -287,7 +307,7 @@ index e909c79a9696..e4aae86d1461 100644
  }
  
  
-@@ -676,9 +875,21 @@ void luaC_barrierback (lua_State *L, Table *t) {
+@@ -676,9 +888,21 @@ void luaC_barrierback (lua_State *L, Table *t) {
    GCObject *o = obj2gco(t);
    lua_assert(isblack(o) && !isdead(g, o));
    lua_assert(g->gcstate != GCSfinalize && g->gcstate != GCSpause);
@@ -325,7 +345,7 @@ index 5a8dc605b319..e6ea569a3109 100644
  
  #endif
 diff --git a/deps/lua/src/lmem.c b/deps/lua/src/lmem.c
-index ae7d8c965f6e..487333b3f5cf 100644
+index ae7d8c965f6e..2c3c8ad32e56 100644
 --- a/deps/lua/src/lmem.c
 +++ b/deps/lua/src/lmem.c
 @@ -5,6 +5,19 @@
@@ -348,7 +368,7 @@ index ae7d8c965f6e..487333b3f5cf 100644
  #include <stddef.h>
  
  #define lmem_c
-@@ -18,6 +31,87 @@
+@@ -18,6 +31,86 @@
  #include "lobject.h"
  #include "lstate.h"
  
@@ -419,15 +439,14 @@ index ae7d8c965f6e..487333b3f5cf 100644
 +    if (++fuzzilua_alloc_counter >= FUZZILUA_GC_STRESS_INTERVAL) {
 +        fuzzilua_alloc_counter = 0;
 +        g->GCthreshold = g->totalbytes;
-+#ifdef FUZZILUA_GC_ASSERT
-+        /* Periodically verify GC invariants (every 256 stress triggers) */
-+        { static unsigned int fuzzilua_invariant_counter = 0;
-+          if (++fuzzilua_invariant_counter >= 4096) {
-+            fuzzilua_invariant_counter = 0;
-+            fuzzilua_gc_check_invariants(g);
-+          }
-+        }
-+#endif
++        /* NOTE: do NOT run fuzzilua_gc_check_invariants() from here.
++         * This hook fires inside luaM_realloc_, before callers have had a
++         * chance to write the returned (possibly relocated) pointer back
++         * into their object graph. A GC walk at this point would observe
++         * stale pointers (e.g. Proto->k still pointing at the freed old
++         * buffer during luaM_reallocvector), producing false-positive
++         * use-after-frees. The full-walk check runs from luaC_step
++         * instead, where caller state is guaranteed consistent. */
 +    }
 +}
 +
@@ -436,7 +455,7 @@ index ae7d8c965f6e..487333b3f5cf 100644
  
  
  /*
-@@ -40,6 +134,44 @@
+@@ -40,6 +133,44 @@
  
  
  
@@ -481,7 +500,7 @@ index ae7d8c965f6e..487333b3f5cf 100644
  #define MINSIZEARRAY	4
  
  
-@@ -76,11 +208,31 @@ void *luaM_toobig (lua_State *L) {
+@@ -76,11 +207,31 @@ void *luaM_toobig (lua_State *L) {
  void *luaM_realloc_ (lua_State *L, void *block, size_t osize, size_t nsize) {
    global_State *g = G(L);
    lua_assert((osize == 0) == (block == NULL));
